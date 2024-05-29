@@ -48,7 +48,7 @@ try {
     }
 
     stage('build') {
-      sh('make release')
+      sh('PATH=/usr/lib/go/sdk/go1.22.2/bin:$PATH make release')
     }
 
     stage('publish') {
