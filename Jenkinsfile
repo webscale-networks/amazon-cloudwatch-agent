@@ -48,14 +48,14 @@ try {
     }
 
     stage('build') {
-      sh('make amazon-cloudwatch-agent')
+      sh('make release')
     }
 
     stage('publish') {
-      def version = "${sh('git describe --tags --abbrev=0')}-${env.BRANCH_NAME}"
-      def svn = "file:///repo/amazon-cloudwatch-agent/${version}"
-      sh("mkdir ${version}; cp build/bin/linux_amd64/amazon-cloudwatch-agent ${version}/")
-      sh("svn import --no-ignore --quiet -m 'Update to version ${version}' ${version} ${svn}")
+      //def version = "${sh('git describe --tags --abbrev=0')}-${env.BRANCH_NAME}"
+      //def svn = "file:///repo/amazon-cloudwatch-agent/${version}"
+      //sh("mkdir ${version}; cp build/bin/linux_amd64/amazon-cloudwatch-agent ${version}/")
+      //sh("svn import --no-ignore --quiet -m 'Update to version ${version}' ${version} ${svn}")
     }
   }
 }
