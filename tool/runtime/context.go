@@ -8,9 +8,18 @@ type Context struct {
 	IsOnPrem                  bool
 	WantPerInstanceMetrics    bool //CPU per core
 	WantEC2TagDimensions      bool
+	WantAggregateDimensions   bool
 	MetricsCollectionInterval int //sub minute, high resolution, metric collect interval, unit as sec.
+	ConfigOutputPath          string
 
 	//linux migration
 	HasExistingLinuxConfig bool
 	ConfigFilePath         string
+
+	//windows migration
+	WindowsNonInteractiveMigration bool
+
+	//Xray Daemon Migration
+	TracesOnly                  bool
+	NonInteractiveXrayMigration bool
 }

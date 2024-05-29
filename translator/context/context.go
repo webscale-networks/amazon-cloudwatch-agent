@@ -4,10 +4,10 @@
 package context
 
 import (
-	"fmt"
+	"log"
+	"os"
 
 	"github.com/aws/amazon-cloudwatch-agent/translator/config"
-	"os"
 )
 
 const (
@@ -23,12 +23,13 @@ func CurrentContext() *Context {
 			proxy:               make(map[string]string),
 			cloudWatchLogConfig: make(map[string]interface{}),
 			runInContainer:      os.Getenv(config.RUN_IN_CONTAINER) == config.RUN_IN_CONTAINER_TRUE,
+			agentLogFile:        "",
 		}
 	}
 	return ctx
 }
 
-//Testing only
+// Testing only
 func ResetContext() {
 	ctx = nil
 }
@@ -40,11 +41,14 @@ type Context struct {
 	multiConfig         string
 	outputTomlFilePath  string
 	mode                string
+	kubernetesMode      string
+	shortMode           string
 	credentials         map[string]string
 	proxy               map[string]string
 	ssl                 map[string]string
 	cloudWatchLogConfig map[string]interface{}
 	runInContainer      bool
+	agentLogFile        string
 }
 
 func (ctx *Context) Os() string {
@@ -94,6 +98,14 @@ func (ctx *Context) Mode() string {
 	return ctx.mode
 }
 
+func (ctx *Context) KubernetesMode() string {
+	return ctx.kubernetesMode
+}
+
+func (ctx *Context) ShortMode() string {
+	return ctx.shortMode
+}
+
 func (ctx *Context) Credentials() map[string]string {
 	return ctx.credentials
 }
@@ -110,10 +122,34 @@ func (ctx *Context) SetMode(mode string) {
 	switch mode {
 	case config.ModeEC2:
 		ctx.mode = config.ModeEC2
+		ctx.shortMode = config.ShortModeEC2
 	case config.ModeOnPrem:
 		ctx.mode = config.ModeOnPrem
+		ctx.shortMode = config.ShortModeOnPrem
+	case config.ModeOnPremise:
+		ctx.mode = config.ModeOnPremise
+		ctx.shortMode = config.ShortModeOnPrem
+	case config.ModeWithIRSA:
+		ctx.mode = config.ModeWithIRSA
+		ctx.shortMode = config.ShortModeWithIRSA
 	default:
-		panic(fmt.Sprintf("Invalid mode %s. Valid mode values are %s and %s.\n", mode, config.ModeEC2, config.ModeOnPrem))
+		log.Panicf("Invalid mode %s. Valid mode values are %s, %s, %s, and %s.", mode, config.ModeEC2, config.ModeOnPrem, config.ModeOnPremise, config.ModeWithIRSA)
+	}
+}
+
+func (ctx *Context) SetKubernetesMode(mode string) {
+	switch mode {
+	case config.ModeEKS:
+		ctx.kubernetesMode = config.ModeEKS
+		ctx.shortMode = config.ShortModeEKS
+	case config.ModeK8sEC2:
+		ctx.kubernetesMode = config.ModeK8sEC2
+		ctx.shortMode = config.ShortModeK8sEC2
+	case config.ModeK8sOnPrem:
+		ctx.kubernetesMode = config.ModeK8sOnPrem
+		ctx.shortMode = config.ShortModeK8sOnPrem
+	default:
+		ctx.kubernetesMode = ""
 	}
 }
 
@@ -143,4 +179,12 @@ func (ctx *Context) RunInContainer() bool {
 
 func (ctx *Context) SetRunInContainer(runInContainer bool) {
 	ctx.runInContainer = runInContainer
+}
+
+func (ctx *Context) GetAgentLogFile() string {
+	return ctx.agentLogFile
+}
+
+func (ctx *Context) SetAgentLogFile(agentLogFile string) {
+	ctx.agentLogFile = agentLogFile
 }

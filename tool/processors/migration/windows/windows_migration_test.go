@@ -4,13 +4,15 @@
 package windows
 
 import (
-	"github.com/aws/amazon-cloudwatch-agent/tool/processors/defaultConfig"
-	"github.com/aws/amazon-cloudwatch-agent/tool/testutil"
-	"github.com/stretchr/testify/assert"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/aws/amazon-cloudwatch-agent/tool/processors/defaultConfig"
+	"github.com/aws/amazon-cloudwatch-agent/tool/testutil"
 )
 
 func TestNextProcessor(t *testing.T) {

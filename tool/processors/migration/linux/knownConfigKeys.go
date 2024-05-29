@@ -5,26 +5,26 @@ package linux
 
 import (
 	"fmt"
+	"log"
 	"strconv"
-
-	"github.com/aws/amazon-cloudwatch-agent/tool/data/config"
-
 	"strings"
 
 	"github.com/bigkevmcd/go-configparser"
+
+	"github.com/aws/amazon-cloudwatch-agent/tool/data/config"
 )
 
-// Get the keys from https://code.amazon.com/packages/AwsCWLogsPlugin/blobs/9efe1aa104aced70f82bb92ee3657f4598266d77/--/cwlogs/push.py#L382-L415
 var knownConfigKeys = []string{
-	"file",                     // "file_path"
-	"log_group_name",           // "log_group_name"
-	"log_stream_name",          // "log_stream_name", currently only single value in the output
-	"datetime_format",          // "timestamp_format", refer to https://code.amazon.com/packages/GoAmzn-CWAgentConfigTranslator/blobs/mainline/--/src/translator/translate/logs/logs_collected/files/collect_list/ruleTimestampFormat.go
-	"time_zone",                // "timezone", UTC or LOCAL
-	"multi_line_start_pattern", // "multi_line_start_pattern"
-	"encoding",                 // "encoding"
-	"buffer_duration",          // "force_flush_interval", from ms to sec
-
+	"file",                           // "file_path"
+	"log_group_name",                 // "log_group_name"
+	"log_stream_name",                // "log_stream_name", currently only single value in the output
+	"log_group_class",                // "log_group_class"
+	"datetime_format",                // "timestamp_format", Based on https://golang.org/src/time/format.go and http://strftime.org/seh1_distribution.go
+	"time_zone",                      // "timezone", UTC or LOCAL
+	"multi_line_start_pattern",       // "multi_line_start_pattern"
+	"encoding",                       // "encoding"
+	"buffer_duration",                // "force_flush_interval", from ms to sec
+	"retention_in_days",              // "retention_in_days"
 	"use_gzip_http_content_encoding", // Not used in new agent. Auto choose when the payload is optimized by this
 	"queue_size",                     // Not used in new agent
 	"initial_position",               // Not really used in new agent. Always set to start from beginning.
@@ -55,6 +55,7 @@ func addLogConfig(logsConfig *config.Logs, filePath, section string, p *configpa
 	logFilePath, _ := p.Get(section, "file")
 	logGroupName, _ := p.Get(section, "log_group_name")
 	logStreamName, _ := p.Get(section, "log_stream_name")
+	logGroupClass, _ := p.Get(section, "log_group_class")
 	timestampFormat, _ := p.Get(section, "datetime_format")
 	timezone, _ := p.Get(section, "time_zone")
 	multiLineStartPattern, _ := p.Get(section, "multi_line_start_pattern")
@@ -65,7 +66,7 @@ func addLogConfig(logsConfig *config.Logs, filePath, section string, p *configpa
 	if encoding != "" {
 		normalized := NormalizeEncoding(encoding)
 		if normalized == "" {
-			panic(fmt.Sprintf("Encoding %s is not supported.", encoding))
+			log.Panicf("E! Encoding %s is not supported.", encoding)
 		} else {
 			encoding = normalized
 		}
@@ -82,5 +83,16 @@ func addLogConfig(logsConfig *config.Logs, filePath, section string, p *configpa
 			}
 		}
 	}
-	logsConfig.AddLogFile(logFilePath, logGroupName, logStreamName, timestampFormat, timezone, multiLineStartPattern, encoding)
+	retentionInDays, _ := p.Get(section, "retention_in_days")
+	retention := -1
+	if retentionInDays != "" {
+		if i, err := strconv.Atoi(retentionInDays); err == nil {
+			fmt.Printf("Retention is valid from config and value of %v", i)
+			retention = i
+		} else {
+			fmt.Printf("Config Retention value of %v is invalid", i)
+		}
+
+	}
+	logsConfig.AddLogFile(logFilePath, logGroupName, logStreamName, timestampFormat, timezone, multiLineStartPattern, encoding, retention, logGroupClass)
 }

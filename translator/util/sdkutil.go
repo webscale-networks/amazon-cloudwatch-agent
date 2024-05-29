@@ -10,22 +10,27 @@ import (
 	"path/filepath"
 	"runtime"
 
-	commonconfig "github.com/aws/amazon-cloudwatch-agent/cfg/commonconfig"
+	"github.com/aws/aws-sdk-go/aws/session"
+
+	"github.com/aws/amazon-cloudwatch-agent/cfg/commonconfig"
 	"github.com/aws/amazon-cloudwatch-agent/translator"
 	"github.com/aws/amazon-cloudwatch-agent/translator/config"
 	"github.com/aws/amazon-cloudwatch-agent/translator/util/ec2util"
 	"github.com/aws/amazon-cloudwatch-agent/translator/util/ecsutil"
-
-	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/amazon-cloudwatch-agent/translator/util/eksdetector"
 )
 
 const (
 	DEFAULT_PROFILE = "AmazonCloudWatchAgent"
 )
 
-var DetectRegion func(mode string, credsConfig map[string]string) string = detectRegion
-var DetectCredentialsPath func() string = detectCredentialsPath
+var DetectRegion = detectRegion
+var DetectCredentialsPath = detectCredentialsPath
+var DefaultEC2Region = defaultEC2Region
+var DefaultECSRegion = defaultECSRegion
+var IsEKS = isEKS
 var runInAws = os.Getenv(config.RUN_IN_AWS)
+var runWithIrsa = os.Getenv(config.RUN_WITH_IRSA)
 
 func DetectAgentMode(configuredMode string) string {
 	if configuredMode != "auto" {
@@ -37,17 +42,42 @@ func DetectAgentMode(configuredMode string) string {
 		return config.ModeEC2
 	}
 
-	if defaultEC2Region() != "" {
+	if runWithIrsa == config.RUN_WITH_IRSA_TRUE {
+		fmt.Println("I! Detected from ENV RUN_WITH_IRSA is True")
+		return config.ModeWithIRSA
+	}
+
+	if DefaultEC2Region() != "" {
 		fmt.Println("I! Detected the instance is EC2")
 		return config.ModeEC2
 	}
 
-	if defaultECSRegion() != "" {
+	if DefaultECSRegion() != "" {
 		fmt.Println("I! Detected the instance is ECS")
 		return config.ModeEC2
 	}
-	fmt.Println("I! Detected the instance is OnPrem")
+
+	fmt.Println("I! Detected the instance is OnPremise")
 	return config.ModeOnPrem
+}
+
+func DetectKubernetesMode(configuredMode string) string {
+	isEKS := IsEKS()
+
+	if isEKS.Err != nil {
+		return "" // not kubernetes
+	}
+
+	if isEKS.Value {
+		return config.ModeEKS
+	}
+
+	if configuredMode == config.ModeEC2 {
+		return config.ModeK8sEC2
+	}
+
+	return config.ModeK8sOnPrem
+
 }
 
 func SDKRegionWithCredsMap(mode string, credsConfig map[string]string) (region string) {
@@ -69,8 +99,8 @@ func SDKRegionWithCredsMap(mode string, credsConfig map[string]string) (region s
 	}
 	CheckAndSetHomeDir()
 	opts.SharedConfigState = session.SharedConfigEnable
-	ses, e := session.NewSessionWithOptions(opts)
-	if e != nil {
+	ses, err := session.NewSessionWithOptions(opts)
+	if err != nil {
 		return ""
 	}
 	if ses.Config != nil && ses.Config.Region != nil {
@@ -88,18 +118,30 @@ func defaultECSRegion() string {
 	return ecsutil.GetECSUtilSingleton().Region
 }
 
-func detectRegion(mode string, credsConfig map[string]string) (region string) {
+func isEKS() eksdetector.IsEKSCache {
+	return eksdetector.IsEKS()
+}
+
+func detectRegion(mode string, credsConfig map[string]string) (region string, regionType string) {
 	region = SDKRegionWithCredsMap(mode, credsConfig)
+	regionType = config.RegionTypeNotFound
+	if region != "" {
+		regionType = config.RegionTypeCredsMap
+	}
 
 	// For ec2, fallback to metadata when no region info found in credential profile.
 	if region == "" && mode == config.ModeEC2 {
-		region = defaultEC2Region()
+
+		fmt.Println("I! Trying to detect region from ec2")
+		region = DefaultEC2Region()
+		regionType = config.RegionTypeEC2Metadata
 	}
 
 	// try to get region from ecs metadata
 	if region == "" && mode == config.ModeEC2 {
-		fmt.Println("I! detect region from ecs")
-		region = defaultECSRegion()
+		fmt.Println("I! Trying to detect region from ecs")
+		region = DefaultECSRegion()
+		regionType = config.RegionTypeECSMetadata
 	}
 
 	return
@@ -128,7 +170,7 @@ func detectHomeDirectory() string {
 		systemDrivePath := GetWindowsSystemDrivePath() // C:
 		homeDir = systemDrivePath + "\\Users\\Administrator"
 	} else {
-		if usr, e := user.Current(); e == nil {
+		if usr, err := user.Current(); err == nil {
 			homeDir = usr.HomeDir
 		}
 		if homeDir == "" {
@@ -157,9 +199,8 @@ func GetCredentials(mode string, credsConfig map[string]string) (result map[stri
 	profile, hasProfile := credsConfig[commonconfig.CredentialProfile]
 	if hasProfile {
 		result[commonconfig.CredentialProfile] = profile
-	} else if mode == config.ModeOnPrem {
+	} else if (mode == config.ModeOnPrem) || (mode == config.ModeOnPremise) {
 		result[commonconfig.CredentialProfile] = DEFAULT_PROFILE
-
 	}
 	return
 }

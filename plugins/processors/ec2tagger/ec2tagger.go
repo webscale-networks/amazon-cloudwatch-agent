@@ -4,184 +4,158 @@
 package ec2tagger
 
 import (
-	"errors"
-	"fmt"
+	"context"
 	"hash/fnv"
 	"os"
 	"sync"
 	"time"
 
-	internalaws "github.com/aws/amazon-cloudwatch-agent/cfg/aws"
-	"github.com/aws/amazon-cloudwatch-agent/internal"
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
-	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/plugins/processors"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.uber.org/zap"
+
+	configaws "github.com/aws/amazon-cloudwatch-agent/cfg/aws"
+	"github.com/aws/amazon-cloudwatch-agent/plugins/processors/ec2tagger/internal/volume"
+	translatorCtx "github.com/aws/amazon-cloudwatch-agent/translator/context"
 )
 
-// Reminder, keep this in sync with the plugin's README.md
-const sampleConfig = `
-  ##
-  ## ec2tagger calls AWS api to fetch EC2 Metadata and Instance Tags and EBS Volumes associated with the
-  ## current EC2 Instance and attched those values as tags to the metric.
-  ##
-  ## Frequency for the plugin to refresh the EC2 Instance Tags and ebs Volumes associated with this Instance.
-  ## Defaults to 0 (no refresh).
-  ## When it is zero, ec2tagger doesn't do refresh to keep the ec2 tags and ebs volumes updated. However, as the
-  ## AWS api request made by ec2tagger might not return the complete values (e.g. initial api call might return a
-  ## subset of ec2 tags), ec2tagger will retry every 3 minutes until all the tags/volumes (as specified by
-  ## "ec2_instance_tag_keys"/"ebs_device_keys") are retrieved successfully. (Note when the specified list is ["*"],
-  ## there is no way to check if all tags/volumes are retrieved, so there is no retry in that case)
-  # refresh_interval_seconds = 60
-  ##
-  ## Add tags for EC2 Metadata fields.
-  ## Supported fields are: "InstanceId", "ImageId" (aka AMI), "InstanceType"
-  ## If the configuration is not provided or it has an empty list, no EC2 Metadata tags are applied.
-  # ec2_metadata_tags = ["InstanceId", "ImageId", "InstanceType"]
-  ##
-  ## Add tags retrieved from the EC2 Instance Tags associated with this instance.
-  ## If this configuration is not provided, or has an empty list, no EC2 Instance Tags are applied.
-  ## If this configuration contains one entry and its value is "*", then ALL EC2 Instance Tags for the instance are applied.
-  ## Note: This plugin renames the "aws:autoscaling:groupName" EC2 Instance Tag key to be spelled "AutoScalingGroupName".
-  ## This aligns it with the AutoScaling dimension-name seen in AWS CloudWatch.
-  # ec2_instance_tag_keys = ["aws:autoscaling:groupName", "Name"]
-  ##
-  ## Retrieve ebs_volume_id for the specified devices, add ebs_volume_id as tag. The specified devices are
-  ## the values corresponding to the tag key "disk_device_tag_key" in the input metric.
-  ## If this configuration is not provided, or has an empty list, no ebs volume is applied.
-  ## If this configuration contains one entry and its value is "*", then all ebs volume for the instance are applied.
-  # ebs_device_keys = ["/dev/xvda", "/dev/nvme0n1"]
-  ##
-  ## Specify which tag to use to get the specified disk device name from input Metric
-  # disk_device_tag_key = "device"
-  ##
-  ## Amazon Credentials
-  ## Credentials are loaded in the following order
-  ## 1) Assumed credentials via STS if role_arn is specified
-  ## 2) explicit credentials from 'access_key' and 'secret_key'
-  ## 3) shared profile from 'profile'
-  ## 4) environment variables
-  ## 5) shared credentials file
-  ## 6) EC2 Instance Profile
-  # access_key = ""
-  # secret_key = ""
-  # token = ""
-  # role_arn = ""
-  # profile = ""
-  # shared_credential_file = ""
-`
-
-const (
-	ec2InstanceTagKeyASG = "aws:autoscaling:groupName"
-	cwDimensionASG       = "AutoScalingGroupName"
-	mdKeyInstanceId      = "InstanceId"
-	mdKeyImageId         = "ImageId"
-	mdKeyInstaneType     = "InstanceType"
-	ebsVolumeId          = "EBSVolumeId"
-)
-
-var (
-	defaultRefreshInterval = 180 * time.Second
-	// backoff retry for ec2 describe instances API call. Assuming the throttle limit is 20 per second. 10 mins allow 12000 API calls.
-	backoffSleepArray = []time.Duration{0, 1 * time.Minute, 1 * time.Minute, 3 * time.Minute, 3 * time.Minute, 3 * time.Minute, 10 * time.Minute}
-)
-
-type metadataLookup struct {
+type ec2MetadataLookupType struct {
 	instanceId   bool
 	imageId      bool
 	instanceType bool
 }
 
-type ec2ProviderType func(*internalaws.CredentialConfig) ec2iface.EC2API
-
-type ec2Metadata interface {
-	Available() bool
-	GetInstanceIdentityDocument() (ec2metadata.EC2InstanceIdentityDocument, error)
+type ec2MetadataRespondType struct {
+	instanceId   string
+	imageId      string // aka AMI
+	instanceType string
+	region       string
 }
 
+type ec2ProviderType func(*configaws.CredentialConfig) ec2iface.EC2API
+
 type Tagger struct {
-	Log                    telegraf.Logger   `toml:"-"`
-	RefreshIntervalSeconds internal.Duration `toml:"refresh_interval_seconds"`
-	EC2MetadataTags        []string          `toml:"ec2_metadata_tags"`
-	EC2InstanceTagKeys     []string          `toml:"ec2_instance_tag_keys"`
-	EBSDeviceKeys          []string          `toml:"ebs_device_keys"`
-	//The tag key in the metrics for disk device
-	DiskDeviceTagKey string `toml:"disk_device_tag_key"`
+	*Config
 
-	// unlike other AWS plugins, this one determines the region from ec2 metadata not user configuration
-	AccessKey string `toml:"access_key"`
-	SecretKey string `toml:"secret_key"`
-	RoleARN   string `toml:"role_arn"`
-	Profile   string `toml:"profile"`
-	Filename  string `toml:"shared_credential_file"`
-	Token     string `toml:"token"`
+	logger           *zap.Logger
+	cancelFunc       context.CancelFunc
+	metadataProvider MetadataProvider
+	ec2Provider      ec2ProviderType
 
-	ec2TagCache    map[string]string
-	instanceId     string
-	imageId        string // aka AMI
-	instanceType   string
-	started        bool
-	region         string
-	ec2Provider    ec2ProviderType
-	ec2            ec2iface.EC2API
-	ec2metadata    ec2Metadata
-	refreshTicker  *time.Ticker
-	shutdownC      chan bool
-	tagFilters     []*ec2.Filter
-	metadataLookup metadataLookup
-	ebsVolume      *EbsVolume
+	shutdownC          chan bool
+	ec2TagCache        map[string]string
+	started            bool
+	ec2MetadataLookup  ec2MetadataLookupType
+	ec2MetadataRespond ec2MetadataRespondType
+	tagFilters         []*ec2.Filter
+	ec2API             ec2iface.EC2API
+	volumeSerialCache  volume.Cache
 
 	sync.RWMutex //to protect ec2TagCache
 }
 
-func (t *Tagger) SampleConfig() string {
-	return sampleConfig
+// newTagger returns a new EC2 Tagger processor.
+func newTagger(config *Config, logger *zap.Logger) *Tagger {
+	_, cancel := context.WithCancel(context.Background())
+	mdCredentialConfig := &configaws.CredentialConfig{}
+
+	p := &Tagger{
+		Config:           config,
+		logger:           logger,
+		cancelFunc:       cancel,
+		metadataProvider: NewMetadataProvider(mdCredentialConfig.Credentials(), config.IMDSRetries),
+		ec2Provider: func(ec2CredentialConfig *configaws.CredentialConfig) ec2iface.EC2API {
+			return ec2.New(
+				ec2CredentialConfig.Credentials(),
+				&aws.Config{
+					LogLevel: configaws.SDKLogLevel(),
+					Logger:   configaws.SDKLogger{},
+				})
+		},
+	}
+	return p
 }
 
-func (t *Tagger) Description() string {
-	return "Configuration for adding EC2 Metadata and Instance Tags and EBS volumes to metrics."
+func getOtelAttributes(m pmetric.Metric) []pcommon.Map {
+	attributes := []pcommon.Map{}
+	switch m.Type() {
+	case pmetric.MetricTypeGauge:
+		dps := m.Gauge().DataPoints()
+		for i := 0; i < dps.Len(); i++ {
+			attributes = append(attributes, dps.At(i).Attributes())
+		}
+	case pmetric.MetricTypeSum:
+		dps := m.Sum().DataPoints()
+		for i := 0; i < dps.Len(); i++ {
+			attributes = append(attributes, dps.At(i).Attributes())
+		}
+	case pmetric.MetricTypeHistogram:
+		dps := m.Histogram().DataPoints()
+		for i := 0; i < dps.Len(); i++ {
+			attributes = append(attributes, dps.At(i).Attributes())
+		}
+	}
+	return attributes
 }
 
-// Apply adds the configured EC2 Metadata and Instance Tags to metrics.
-//
-// This is called serially for ALL metrics (that pass the plugin's tag filters) so keep it fast.
-//
-func (t *Tagger) Apply(in ...telegraf.Metric) []telegraf.Metric {
+func (t *Tagger) processMetrics(ctx context.Context, md pmetric.Metrics) (pmetric.Metrics, error) {
 	// grab the pointer to the map in case it gets refreshed while we're applying this round of metrics. At least
 	// this batch then will all get the same tags.
 	t.RLock()
 	defer t.RUnlock()
 
 	if !t.started {
-		return []telegraf.Metric{}
+		return pmetric.NewMetrics(), nil
 	}
 
-	for _, metric := range in {
-		if t.ec2TagCache != nil {
-			for k, v := range t.ec2TagCache {
-				metric.AddTag(k, v)
-			}
-		}
-		if t.metadataLookup.instanceId {
-			metric.AddTag(mdKeyInstanceId, t.instanceId)
-		}
-		if t.metadataLookup.imageId {
-			metric.AddTag(mdKeyImageId, t.imageId)
-		}
-		if t.metadataLookup.instanceType {
-			metric.AddTag(mdKeyInstaneType, t.instanceType)
-		}
-		if t.ebsVolume != nil && metric.HasTag(t.DiskDeviceTagKey) {
-			devName := metric.Tags()[t.DiskDeviceTagKey]
-			ebsVolId := t.ebsVolume.getEbsVolumeId(devName)
-			if ebsVolId != "" {
-				metric.AddTag(ebsVolumeId, ebsVolId)
+	rms := md.ResourceMetrics()
+	for i := 0; i < rms.Len(); i++ {
+		sms := rms.At(i).ScopeMetrics()
+		for j := 0; j < sms.Len(); j++ {
+			metrics := sms.At(j).Metrics()
+			for k := 0; k < metrics.Len(); k++ {
+				attributes := getOtelAttributes(metrics.At(k))
+				t.updateOtelAttributes(attributes)
 			}
 		}
 	}
-	return in
+	return md, nil
+}
+
+// updateOtelAttributes adds tags and the requested dimensions to the attributes of each
+// DataPoint. We add and remove at the DataPoint level instead of resource level because this is
+// where the receiver/adapter does.
+func (t *Tagger) updateOtelAttributes(attributes []pcommon.Map) {
+	for _, attr := range attributes {
+		if t.ec2TagCache != nil {
+			for k, v := range t.ec2TagCache {
+				attr.PutStr(k, v)
+			}
+		}
+		if t.ec2MetadataLookup.instanceId {
+			attr.PutStr(mdKeyInstanceId, t.ec2MetadataRespond.instanceId)
+		}
+		if t.ec2MetadataLookup.imageId {
+			attr.PutStr(mdKeyImageId, t.ec2MetadataRespond.imageId)
+		}
+		if t.ec2MetadataLookup.instanceType {
+			attr.PutStr(mdKeyInstanceType, t.ec2MetadataRespond.instanceType)
+		}
+		if t.volumeSerialCache != nil {
+			if devName, found := attr.Get(t.DiskDeviceTagKey); found {
+				serial := t.volumeSerialCache.Serial(devName.Str())
+				if serial != "" {
+					attr.PutStr(AttributeVolumeId, serial)
+				}
+			}
+		}
+		// If append_dimensions are applied, then remove the host dimension.
+		attr.Remove("host")
+	}
 }
 
 // updateTags calls EC2 Describe Tags and replaces the Tagger's tagCache with the newly retrieved values
@@ -192,7 +166,7 @@ func (t *Tagger) updateTags() error {
 	}
 
 	for {
-		result, err := t.ec2.DescribeTags(input)
+		result, err := t.ec2API.DescribeTags(input)
 		if err != nil {
 			return err
 		}
@@ -215,9 +189,10 @@ func (t *Tagger) updateTags() error {
 	return nil
 }
 
-// Shutdown currently does not get called, as telegraf does not have a cleanup hook for Filter plugins
-func (t *Tagger) Shutdown() {
+func (t *Tagger) Shutdown(context.Context) error {
 	close(t.shutdownC)
+	t.cancelFunc()
+	return nil
 }
 
 // refreshLoop handles the refresh ticks and also responds to shutdown signal
@@ -227,30 +202,35 @@ func (t *Tagger) refreshLoop(refreshInterval time.Duration, stopAfterFirstSucces
 	for {
 		select {
 		case <-refreshTicker.C:
-			t.Log.Debugf("ec2tagger refreshing: EC2InstanceTags needed %v, retrieved: %v, ebs device needed %v, retrieved: %v", len(t.EC2InstanceTagKeys), t.ec2TagsRetrieved(), len(t.EBSDeviceKeys), t.ebsVolumesRetrieved())
+			t.logger.Debug("ec2tagger refreshing")
+			allTagsRetrieved := t.ec2TagsRetrieved()
+			allVolumesRetrieved := t.ebsVolumesRetrieved()
+			t.logger.Debug("Retrieve status",
+				zap.Bool("Ec2AllTagsRetrieved", allTagsRetrieved),
+				zap.Bool("EbsAllVolumesRetrieved", allVolumesRetrieved))
 			refreshTags := len(t.EC2InstanceTagKeys) > 0
 			refreshVolumes := len(t.EBSDeviceKeys) > 0
 
 			if stopAfterFirstSuccess {
 				// need refresh tags when it is configured and not all ec2 tags are retrieved
-				refreshTags = refreshTags && !t.ec2TagsRetrieved()
+				refreshTags = refreshTags && !allTagsRetrieved
 				// need refresh volumes when it is configured and not all volumes are retrieved
-				refreshVolumes = refreshVolumes && !t.ebsVolumesRetrieved()
+				refreshVolumes = refreshVolumes && !allVolumesRetrieved
 				if !refreshTags && !refreshVolumes {
-					t.Log.Infof("ec2tagger: Refresh is no longer needed, stop refreshTicker.")
+					t.logger.Info("ec2tagger: Refresh is no longer needed, stop refreshTicker.")
 					return
 				}
 			}
 
 			if refreshTags {
 				if err := t.updateTags(); err != nil {
-					t.Log.Warnf("ec2tagger: Error refreshing EC2 tags, keeping old values : +%v", err.Error())
+					t.logger.Warn("ec2tagger: Error refreshing EC2 tags, keeping old values", zap.Error(err))
 				}
 			}
 
 			if refreshVolumes {
 				if err := t.updateVolumes(); err != nil {
-					t.Log.Warnf("ec2tagger: Error refreshing EC2 volumes, keeping old values : +%v", err.Error())
+					t.logger.Warn("ec2tagger: Error refreshing EBS volumes, keeping old values", zap.Error(err))
 				}
 			}
 
@@ -281,7 +261,7 @@ func (t *Tagger) ec2TagsRetrieved() bool {
 	return allTagsRetrieved
 }
 
-//ebsVolumesRetrieved checks if all volumes are successfully retrieved
+// ebsVolumesRetrieved checks if all volumes are successfully retrieved
 func (t *Tagger) ebsVolumesRetrieved() bool {
 	allVolumesRetrieved := true
 
@@ -289,7 +269,7 @@ func (t *Tagger) ebsVolumesRetrieved() bool {
 		if key == "*" {
 			continue
 		}
-		if volId := t.ebsVolume.getEbsVolumeId(key); volId == "" {
+		if volId := t.volumeSerialCache.Serial(key); volId == "" {
 			allVolumesRetrieved = false
 			break
 		}
@@ -297,42 +277,15 @@ func (t *Tagger) ebsVolumesRetrieved() bool {
 	return allVolumesRetrieved
 }
 
-//Init() acts as input validation and serves the purpose of updating ec2 tags and ebs volumes if necessary.
-//It will be called when Telegraf is enabling each processor plugin
-func (t *Tagger) Init() error {
+// Start acts as input validation and serves the purpose of updating ec2 tags and ebs volumes if necessary.
+// It will be called when OTel is enabling each processor
+func (t *Tagger) Start(ctx context.Context, _ component.Host) error {
 	t.shutdownC = make(chan bool)
 	t.ec2TagCache = map[string]string{}
 
-	for _, tag := range t.EC2MetadataTags {
-		switch tag {
-		case mdKeyInstanceId:
-			t.metadataLookup.instanceId = true
-		case mdKeyImageId:
-			t.metadataLookup.imageId = true
-		case mdKeyInstaneType:
-			t.metadataLookup.instanceType = true
-		default:
-			t.Log.Errorf("ec2tagger: Unsupported EC2 Metadata key: %s", tag)
-		}
+	if err := t.deriveEC2MetadataFromIMDS(ctx); err != nil {
+		return err
 	}
-
-	if !t.ec2metadata.Available() {
-		msg := "ec2tagger: Unable to retrieve InstanceId. This plugin must only be used on an EC2 instance"
-		t.Log.Errorf(msg)
-		return errors.New(msg)
-	}
-
-	doc, err := t.ec2metadata.GetInstanceIdentityDocument()
-	if nil != err {
-		msg := fmt.Sprintf("ec2tagger: Unable to retrieve InstanceId : %+v", err.Error())
-		t.Log.Errorf(msg)
-		return errors.New(msg)
-	}
-
-	t.instanceId = doc.InstanceID
-	t.region = doc.Region
-	t.instanceType = doc.InstanceType
-	t.imageId = doc.ImageID
 
 	t.tagFilters = []*ec2.Filter{
 		{
@@ -341,7 +294,7 @@ func (t *Tagger) Init() error {
 		},
 		{
 			Name:   aws.String("resource-id"),
-			Values: aws.StringSlice([]string{t.instanceId}),
+			Values: aws.StringSlice([]string{t.ec2MetadataRespond.instanceId}),
 		},
 	}
 
@@ -363,21 +316,21 @@ func (t *Tagger) Init() error {
 	}
 
 	if len(t.EC2InstanceTagKeys) > 0 || len(t.EBSDeviceKeys) > 0 {
-		ec2CredentialConfig := &internalaws.CredentialConfig{
-			Region:    t.region,
+		ec2CredentialConfig := &configaws.CredentialConfig{
 			AccessKey: t.AccessKey,
 			SecretKey: t.SecretKey,
 			RoleARN:   t.RoleARN,
 			Profile:   t.Profile,
 			Filename:  t.Filename,
 			Token:     t.Token,
+			Region:    t.ec2MetadataRespond.region,
 		}
-		t.ec2 = t.ec2Provider(ec2CredentialConfig)
+		t.ec2API = t.ec2Provider(ec2CredentialConfig)
 		go func() { //Async start of initial retrieval to prevent block of agent start
 			t.initialRetrievalOfTagsAndVolumes()
 			t.refreshLoopToUpdateTagsAndVolumes()
 		}()
-		t.Log.Infof("ec2tagger: EC2 tagger has started initialization.")
+		t.logger.Info("ec2tagger: EC2 tagger has started initialization.")
 
 	} else {
 		t.setStarted()
@@ -389,9 +342,9 @@ func (t *Tagger) Init() error {
 func (t *Tagger) refreshLoopToUpdateTagsAndVolumes() {
 	needRefresh := false
 	stopAfterFirstSuccess := false
-	refreshInterval := t.RefreshIntervalSeconds.Duration
+	refreshInterval := t.RefreshIntervalSeconds
 
-	if t.RefreshIntervalSeconds.Duration.Seconds() == 0 {
+	if t.RefreshIntervalSeconds.Seconds() == 0 {
 		//when the refresh interval is 0, this means that customer don't want to
 		//update tags/volumes values once they are retrieved successfully. In this case,
 		//we still want to do refresh to make sure all the specified keys for tags/volumes
@@ -402,7 +355,7 @@ func (t *Tagger) refreshLoopToUpdateTagsAndVolumes() {
 			!(len(t.EBSDeviceKeys) == 1 && t.EBSDeviceKeys[0] == "*")
 		stopAfterFirstSuccess = true
 		refreshInterval = defaultRefreshInterval
-	} else if t.RefreshIntervalSeconds.Duration.Seconds() > 0 {
+	} else if t.RefreshIntervalSeconds.Seconds() > 0 {
 		//customer wants to update the tags/volumes with the given refresh interval
 		needRefresh = true
 	}
@@ -419,34 +372,15 @@ func (t *Tagger) refreshLoopToUpdateTagsAndVolumes() {
 
 // updateVolumes calls EC2 describe volume
 func (t *Tagger) updateVolumes() error {
-	if t.ebsVolume == nil {
-		t.ebsVolume = NewEbsVolume()
+	if t.volumeSerialCache == nil {
+		t.volumeSerialCache = volume.NewCache(volume.NewProvider(t.ec2API, t.ec2MetadataRespond.instanceId))
 	}
 
-	input := &ec2.DescribeVolumesInput{
-		Filters: []*ec2.Filter{
-			{
-				Name:   aws.String("attachment.instance-id"),
-				Values: aws.StringSlice([]string{t.instanceId}),
-			},
-		},
+	if err := t.volumeSerialCache.Refresh(); err != nil {
+		return err
 	}
 
-	for {
-		result, err := t.ec2.DescribeVolumes(input)
-		if err != nil {
-			return err
-		}
-		for _, volume := range result.Volumes {
-			for _, attachment := range volume.Attachments {
-				t.ebsVolume.addEbsVolumeMapping(volume.AvailabilityZone, attachment)
-			}
-		}
-		if result.NextToken == nil {
-			break
-		}
-		input.SetNextToken(*result.NextToken)
-	}
+	t.logger.Debug("Volume Serial Cache", zap.Strings("devices", t.volumeSerialCache.Devices()))
 	return nil
 }
 
@@ -454,7 +388,50 @@ func (t *Tagger) setStarted() {
 	t.Lock()
 	t.started = true
 	t.Unlock()
-	t.Log.Infof("ec2tagger: EC2 tagger has started, finished initial retrieval of tags and Volumes")
+	t.logger.Info("ec2tagger: EC2 tagger has started, finished initial retrieval of tags and Volumes")
+}
+
+/*
+Retrieve metadata from IMDS and use these metadata to:
+* Extract InstanceID, ImageID, InstanceType to create custom dimension for collected metrics
+* Extract InstanceID to retrieve Instance's Volume and Tags
+* Extract Region to create aws session with custom configuration
+For more information on IMDS, please follow this document https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-metadata.html
+*/
+func (t *Tagger) deriveEC2MetadataFromIMDS(ctx context.Context) error {
+	for _, tag := range t.EC2MetadataTags {
+		switch tag {
+		case mdKeyInstanceId:
+			t.ec2MetadataLookup.instanceId = true
+		case mdKeyImageId:
+			t.ec2MetadataLookup.imageId = true
+		case mdKeyInstanceType:
+			t.ec2MetadataLookup.instanceType = true
+		default:
+			t.logger.Error("ec2tagger: Unsupported EC2 Metadata key", zap.String("mdKey", tag))
+		}
+	}
+
+	t.logger.Info("ec2tagger: Check EC2 Metadata.")
+	doc, err := t.metadataProvider.Get(ctx)
+	if err != nil {
+		t.logger.Error("ec2tagger: Unable to retrieve EC2 Metadata. This plugin must only be used on an EC2 instance.")
+		if translatorCtx.CurrentContext().RunInContainer() {
+			t.logger.Warn("ec2tagger: Timeout may have occurred because hop limit is too small. Please increase hop limit to 2 by following this document https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-options.html#configuring-IMDS-existing-instances.")
+		}
+		return err
+	}
+
+	t.ec2MetadataRespond.region = doc.Region
+	t.ec2MetadataRespond.instanceId = doc.InstanceID
+	if t.ec2MetadataLookup.imageId {
+		t.ec2MetadataRespond.imageId = doc.ImageID
+	}
+	if t.ec2MetadataLookup.instanceType {
+		t.ec2MetadataRespond.instanceType = doc.InstanceType
+	}
+
+	return nil
 }
 
 // This function never return until calling updateTags() and updateVolumes() succeed or shutdown happen.
@@ -480,12 +457,12 @@ func (t *Tagger) initialRetrievalOfTagsAndVolumes() {
 		}
 
 		if retry > 0 {
-			t.Log.Infof("ec2tagger: %v retry for initial retrieval of tags and volumes", retry)
+			t.logger.Info("ec2tagger: initial retrieval of tags and volumes", zap.Int("retry", retry))
 		}
 
 		if !tagsRetrieved {
 			if err := t.updateTags(); err != nil {
-				t.Log.Warnf("ec2tagger: Unable to describe ec2 tags for initial retrieval: %v", err)
+				t.logger.Warn("ec2tagger: Unable to describe ec2 tags for initial retrieval", zap.Error(err))
 			} else {
 				tagsRetrieved = true
 			}
@@ -493,14 +470,14 @@ func (t *Tagger) initialRetrievalOfTagsAndVolumes() {
 
 		if !volsRetrieved {
 			if err := t.updateVolumes(); err != nil {
-				t.Log.Errorf("ec2tagger: Unable to describe ec2 volume for initial retrieval: %v", err)
+				t.logger.Error("ec2tagger: Unable to describe ec2 volume for initial retrieval", zap.Error(err))
 			} else {
 				volsRetrieved = true
 			}
 		}
 
 		if tagsRetrieved { // volsRetrieved is not checked to keep behavior consistency
-			t.Log.Infof("ec2tagger: Initial retrieval of tags succeded")
+			t.logger.Info("ec2tagger: Initial retrieval of tags succeeded")
 			t.setStarted()
 			return
 		}
@@ -524,20 +501,4 @@ func hostJitter(max time.Duration) time.Duration {
 	// Right shift the uint64 hash by one to make sure the jitter duration is always positive
 	hostSleepJitter := time.Duration(int64(hash.Sum64()>>1)) % max
 	return hostSleepJitter
-}
-
-// init adds this plugin to the framework's "processors" registry
-func init() {
-	processors.Add("ec2tagger", func() telegraf.Processor {
-		mdCredentialConfig := &internalaws.CredentialConfig{}
-		mdConfigProvider := mdCredentialConfig.Credentials()
-		ec2Provider := func(ec2CredentialConfig *internalaws.CredentialConfig) ec2iface.EC2API {
-			ec2ConfigProvider := ec2CredentialConfig.Credentials()
-			return ec2.New(ec2ConfigProvider)
-		}
-		return &Tagger{
-			ec2metadata: ec2metadata.New(mdConfigProvider),
-			ec2Provider: ec2Provider,
-		}
-	})
 }

@@ -5,6 +5,7 @@ package data
 
 import (
 	"fmt"
+
 	"github.com/aws/amazon-cloudwatch-agent/tool/data/config"
 	"github.com/aws/amazon-cloudwatch-agent/tool/runtime"
 	"github.com/aws/amazon-cloudwatch-agent/tool/util"
@@ -14,6 +15,7 @@ type Config struct {
 	AgentConfig   *config.AgentConfig
 	MetricsConfig *config.Metrics
 	LogsConfig    *config.Logs
+	TracesConfig  *config.Traces
 }
 
 func (config *Config) ToMap(ctx *runtime.Context) (string, map[string]interface{}) {
@@ -27,6 +29,9 @@ func (config *Config) ToMap(ctx *runtime.Context) (string, map[string]interface{
 	if config.LogsConfig != nil {
 		util.AddToMap(ctx, resultMap, config.LogsConfig)
 	}
+	if config.TracesConfig != nil {
+		util.AddToMap(ctx, resultMap, config.TracesConfig)
+	}
 
 	return "", resultMap
 }
@@ -36,6 +41,12 @@ func (conf *Config) AgentConf() *config.AgentConfig {
 		conf.AgentConfig = new(config.AgentConfig)
 	}
 	return conf.AgentConfig
+}
+func (conf *Config) TracesConf() *config.Traces {
+	if conf.TracesConfig == nil {
+		conf.TracesConfig = new(config.Traces)
+	}
+	return conf.TracesConfig
 }
 
 func (conf *Config) MetricsConf() *config.Metrics {

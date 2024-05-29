@@ -6,6 +6,8 @@ package defaultConfig
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"strconv"
 
 	"github.com/aws/amazon-cloudwatch-agent/tool/data"
 	"github.com/aws/amazon-cloudwatch-agent/tool/processors"
@@ -17,8 +19,6 @@ import (
 	"github.com/aws/amazon-cloudwatch-agent/tool/processors/question/logs"
 	"github.com/aws/amazon-cloudwatch-agent/tool/runtime"
 	"github.com/aws/amazon-cloudwatch-agent/tool/util"
-	"log"
-	"strconv"
 )
 
 var Processor processors.Processor = &processor{}
@@ -32,6 +32,7 @@ func (p *processor) NextProcessor(ctx *runtime.Context, config *data.Config) int
 	if wantMonitorAnyHostMetrics() {
 		wantPerInstanceMetrics(ctx)
 		wantEC2TagDimensions(ctx)
+		wantEC2AggregateDimensions(ctx)
 		metricsCollectInterval(ctx)
 	} else {
 		if ctx.OsParameter == util.OsTypeWindows {
@@ -43,11 +44,11 @@ func (p *processor) NextProcessor(ctx *runtime.Context, config *data.Config) int
 
 	backupCtx, err := json.Marshal(ctx)
 	if err != nil {
-		fmt.Printf("Error occured when marshal context object into json:\n %v\n", err)
+		fmt.Printf("Error occurred when marshal context object into json:\n %v\n", err)
 	}
 	backupConfig, err := json.Marshal(config)
 	if err != nil {
-		fmt.Printf("Error occured when marshal config object into json:\n %v\n", err)
+		fmt.Printf("Error occurred when marshal config object into json:\n %v\n", err)
 	}
 	for {
 		//This is to avoid golang import cycle not allowed issue, we need to go back to the parent if the user is not satisfied with the config.
@@ -62,7 +63,7 @@ func (p *processor) NextProcessor(ctx *runtime.Context, config *data.Config) int
 		case "None":
 			return question.Processor
 		default:
-			panic(whichDefaultConfig)
+			log.Panicf("Unknown default config: %s", whichDefaultConfig)
 		}
 		if config.SatisfiedWithCurrentConfig(ctx) {
 			if ctx.OsParameter == util.OsTypeWindows {
@@ -73,11 +74,11 @@ func (p *processor) NextProcessor(ctx *runtime.Context, config *data.Config) int
 		} else {
 			err := json.Unmarshal(backupCtx, ctx)
 			if err != nil {
-				fmt.Printf("Error occured when unmarshal context object into json:\n %v\n", err)
+				fmt.Printf("Error occurred when unmarshal context object into json:\n %v\n", err)
 			}
 			err = json.Unmarshal(backupConfig, config)
 			if err != nil {
-				fmt.Printf("Error occured when unmarshal config object into json:\n %v\n", err)
+				fmt.Printf("Error occurred when unmarshal config object into json:\n %v\n", err)
 			}
 		}
 	}
@@ -96,7 +97,7 @@ func wantMonitorAnyHostMetrics() bool {
 }
 
 func wantPerInstanceMetrics(ctx *runtime.Context) {
-	ctx.WantPerInstanceMetrics = util.Yes("Do you want to monitor cpu metrics per core? Additional CloudWatch charges may apply.")
+	ctx.WantPerInstanceMetrics = util.Yes("Do you want to monitor cpu metrics per core?")
 }
 
 func wantEC2TagDimensions(ctx *runtime.Context) {
@@ -104,6 +105,13 @@ func wantEC2TagDimensions(ctx *runtime.Context) {
 		return
 	}
 	ctx.WantEC2TagDimensions = util.Yes("Do you want to add ec2 dimensions (ImageId, InstanceId, InstanceType, AutoScalingGroupName) into all of your metrics if the info is available?")
+}
+
+func wantEC2AggregateDimensions(ctx *runtime.Context) {
+	if ctx.IsOnPrem {
+		return
+	}
+	ctx.WantAggregateDimensions = util.Yes("Do you want to aggregate ec2 dimensions (InstanceId)?")
 }
 
 func metricsCollectInterval(ctx *runtime.Context) {

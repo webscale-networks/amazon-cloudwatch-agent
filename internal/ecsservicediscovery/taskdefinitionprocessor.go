@@ -4,6 +4,8 @@
 package ecsservicediscovery
 
 import (
+	"log"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ecs"
 	"github.com/hashicorp/golang-lru/simplelru"
@@ -31,7 +33,7 @@ func NewTaskDefinitionProcessor(ecs *ecs.ECS, s *ProcessorStats) *TaskDefinition
 	// initiate the caching
 	lru, err := simplelru.NewLRU(taskDefCacheSize, nil)
 	if err != nil {
-		panic(err)
+		log.Panicf("E! Initial task definition with caching failed because of %v", err)
 	}
 	p.taskDefCache = lru
 	return p
@@ -47,7 +49,7 @@ func (p *TaskDefinitionProcessor) Process(cluster string, taskList []*DecoratedT
 		arn2Definition[aws.StringValue(t.Task.TaskDefinitionArn)] = nil
 	}
 
-	for k, _ := range arn2Definition {
+	for k := range arn2Definition {
 		if k == "" {
 			continue
 		}

@@ -5,7 +5,6 @@ package logfile
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -14,11 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/amazon-cloudwatch-agent/logs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
+
+	"github.com/aws/amazon-cloudwatch-agent/logs"
 )
 
 const (
@@ -191,7 +191,7 @@ func TestCompressedFile(t *testing.T) {
 
 func TestRestoreState(t *testing.T) {
 	multilineWaitPeriod = 10 * time.Millisecond
-	tmpfolder, err := ioutil.TempDir("", "")
+	tmpfolder, err := os.MkdirTemp("", "")
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpfolder)
 
@@ -199,7 +199,7 @@ func TestRestoreState(t *testing.T) {
 	logFileStateFileName := "_tmp_logfile.log"
 
 	offset := int64(9323)
-	err = ioutil.WriteFile(
+	err = os.WriteFile(
 		tmpfolder+string(filepath.Separator)+logFileStateFileName,
 		[]byte(strconv.FormatInt(offset, 10)+"\n"+logFilePath),
 		os.ModePerm)
@@ -209,7 +209,20 @@ func TestRestoreState(t *testing.T) {
 	tt.Log = TestLogger{t}
 	tt.FileStateFolder = tmpfolder
 	roffset, err := tt.restoreState(logFilePath)
+	require.NoError(t, err)
 	assert.Equal(t, offset, roffset, fmt.Sprintf("The actual offset is %d, different from the expected offset %d.", roffset, offset))
+
+	// Test negative offset.
+	offset = int64(-8675)
+	err = os.WriteFile(
+		tmpfolder+string(filepath.Separator)+logFileStateFileName,
+		[]byte(strconv.FormatInt(offset, 10)+"\n"+logFilePath),
+		os.ModePerm)
+	require.NoError(t, err)
+	roffset, err = tt.restoreState(logFilePath)
+	require.Error(t, err)
+	assert.Equal(t, int64(0), roffset, fmt.Sprintf("The actual offset is %d, different from the expected offset %d.", roffset, offset))
+
 	tt.Stop()
 }
 
@@ -311,7 +324,7 @@ func TestLogsMultilineEvent(t *testing.T) {
 	tt.Stop()
 }
 
-//When file is removed, the related tail routing should exit
+// When file is removed, the related tail routing should exit
 func TestLogsFileRemove(t *testing.T) {
 	multilineWaitPeriod = 10 * time.Millisecond
 	logEntryString := "anything"
@@ -358,96 +371,134 @@ func TestLogsFileRemove(t *testing.T) {
 	tt.Stop()
 }
 
-//When another file is created for the same file config and the file config has auto_removal as true, the old files will stop at EOF and removed afterwards
-func TestLogsFileAutoRemoval(t *testing.T) {
-	multilineWaitPeriod = 10 * time.Millisecond
-	logEntryString := "anything"
-	filePrefix := "file_auto_removal"
-	tmpfile1, err := createTempFile("", filePrefix)
-	require.NoError(t, err)
-
-	_, err = tmpfile1.WriteString(logEntryString + "\n")
-	require.NoError(t, err)
-	tmpfile1.Sync()
-	tmpfile1.Close()
-
-	tt := NewLogFile()
-	tt.Log = TestLogger{t}
-	tt.FileConfig = []FileConfig{{
-		FilePath:      filepath.Join(filepath.Dir(tmpfile1.Name()), filePrefix+"*"),
+func setupLogFileForTest(t *testing.T, monitorPath string) *LogFile {
+	logFile := NewLogFile()
+	logFile.Log = TestLogger{t}
+	t.Logf("create LogFile with FilePath = %s", monitorPath)
+	logFile.FileConfig = []FileConfig{{
+		FilePath:      monitorPath,
 		FromBeginning: true,
 		AutoRemoval:   true,
 	}}
-	tt.FileConfig[0].init()
-	tt.started = true
+	logFile.FileConfig[0].init()
+	logFile.started = true
+	return logFile
+}
 
-	lsrcs := tt.FindLogSrc()
-	if len(lsrcs) != 1 {
-		t.Fatalf("%v log src was returned when 1 should be available", len(lsrcs))
-	}
+func makeTempFile(t *testing.T, prefix string) *os.File {
+	file, err := createTempFile("", prefix)
+	t.Logf("Created temp file, %s\n", file.Name())
+	require.NoError(t, err)
+	return file
+}
 
-	lsrc := lsrcs[0]
+// getLogSrc returns a LogSrc from the given LogFile, and the channel for output.
+// Verifies 1 and only 1 LogSrc is discovered.
+func getLogSrc(t *testing.T, logFile *LogFile) (*logs.LogSrc, chan logs.LogEvent) {
+	start := time.Now()
+	logSources := logFile.FindLogSrc()
+	duration := time.Since(start)
+	// LogFile.FindLogSrc() should not block.
+	require.Less(t, duration, time.Millisecond*100)
+	require.Equal(t, 1, len(logSources), "FindLogSrc() expected 1, got %d", len(logSources))
+	logSource := logSources[0]
 	evts := make(chan logs.LogEvent)
-	lsrc.SetOutput(func(e logs.LogEvent) {
+	logSource.SetOutput(func(e logs.LogEvent) {
 		if e != nil {
 			evts <- e
 		}
 	})
+	return &logSource, evts
+}
 
-	var tmpfile2 *os.File
-	defer func() {
-		if tmpfile2 != nil {
-			os.Remove(tmpfile2.Name())
-		}
-	}()
-	go func() {
-		time.Sleep(1 * time.Second)
-
-		// create a new file matching configured pattern
-		tmpfile2, err = createTempFile("", filePrefix)
+func writeLines(t *testing.T, file *os.File, numLines int, msg string) {
+	t.Logf("start writing, %s", file.Name())
+	for i := 0; i < numLines; i++ {
+		_, err := file.WriteString(msg + "\n")
 		require.NoError(t, err)
-
-		_, err = tmpfile2.WriteString(logEntryString + "\n")
-		require.NoError(t, err)
-
-	}()
-
-	e := <-evts
-	if e.Message() != logEntryString {
-		t.Errorf("Wrong log found from first file: \n%v\nExpecting:\n%v\n", e.Message(), logEntryString)
 	}
-	defer lsrc.Stop()
+	t.Logf("stop writing, %s", file.Name())
+}
 
-	for {
-		lsrcs = tt.FindLogSrc()
-		if len(lsrcs) > 0 {
-			break
+// createWriteRead creates a temp file, writes to it, then verifies events
+// are received. If isParent is true, then spawn a 2nd goroutine for createWriteRead.
+// Closes "done" when complete to let caller know it was successful.
+func createWriteRead(t *testing.T, prefix string, logFile *LogFile, done chan bool, isParent bool) {
+	// Let caller know when the goroutine is done.
+	defer close(done)
+	// done2 is only passed to child if this is the parent.
+	done2 := make(chan bool)
+	file := makeTempFile(t, prefix)
+	logSrc, evts := getLogSrc(t, logFile)
+	defer (*logSrc).Stop()
+	defer close(evts)
+	// Choose a large enough number of lines so that even high-spec hosts will not
+	// complete receiving logEvents before the 2nd createWriteRead() goroutine begins.
+	const numLines int = 1000000
+	const msg string = "this is the best log line ever written to a file"
+	writeLines(t, file, numLines, msg)
+	file.Close()
+	t.Log("Verify every line written to the temp file is received.")
+	for i := 0; i < numLines; i++ {
+		logEvent := <-evts
+		require.Equal(t, msg, logEvent.Message())
+		if isParent && i == numLines/2 {
+			// Halfway through start child goroutine to create another temp file.
+			go createWriteRead(t, prefix, logFile, done2, false)
 		}
-		time.Sleep(1 * time.Second)
 	}
-
-	lsrc = lsrcs[0]
-	lsrc.SetOutput(func(e logs.LogEvent) {
-		if e != nil {
-			evts <- e
+	// Only wait for child if it was spawned
+	if isParent {
+		t.Log("Verify child completed.")
+		select {
+		case <-done2:
+			t.Log("Child completed before timeout (as expected)")
+		case <-time.After(time.Second * 20):
+			require.Fail(t, "timeout waiting for child")
 		}
-	})
-
-	e = <-evts
-	if e.Message() != logEntryString {
-		t.Errorf("Wrong log found from 2nd file: \n% x\nExpecting:\n% x\n", e.Message(), logEntryString)
+		t.Log("Verify 1st temp file was auto deleted.")
+		_, err := os.Open(file.Name())
+		assert.True(t, os.IsNotExist(err))
 	}
+}
 
-	_, err = os.Open(tmpfile1.Name())
-	assert.True(t, os.IsNotExist(err))
+// TestLogsFileAutoRemoval verifies when a new file matching the configured
+// FilePath is discovered, the old file will be automatically deleted ONLY after
+// being read to the end-of-file. Also verifies the new log file is discovered
+// before finishing the old file.
+func TestLogsFileAutoRemoval(t *testing.T) {
+	// Override global in tailersrc.go.
+	multilineWaitPeriod = 10 * time.Millisecond
+	prefix := "TestLogsFileAutoRemoval*"
+	f1 := makeTempFile(t, prefix)
+	f1.Close()
+	os.Remove(f1.Name())
+	// Create the LogFile.
+	fileDirectoryPath := filepath.Dir(f1.Name())
+	monitorPath := filepath.Join(fileDirectoryPath, prefix)
+	logFile := setupLogFileForTest(t, monitorPath)
+	defer logFile.Stop()
 
-	lsrc.Stop()
-	tt.Stop()
+	done := make(chan bool)
+	createWriteRead(t, prefix, logFile, done, true)
+	t.Log("Verify 1st tmp file created and discovered.")
+	select {
+	case <-done:
+		t.Log("Parent completed before timeout (as expected)")
+	case <-time.After(time.Second * 10):
+		require.Fail(t, "timeout waiting for 2nd temp file.")
+	}
+	// Cleanup
+	files, _ := filepath.Glob(monitorPath)
+	for _, f := range files {
+		t.Logf("cleanup, %s", f)
+		os.Remove(f)
+	}
 }
 
 func TestLogsTimestampAsMultilineStarter(t *testing.T) {
 	multilineWaitPeriod = 10 * time.Millisecond
-	logEntryString := `15:04:05 18 Nov 2 multiline starter is in begining
+	logEntryString := `15:04:05 18 Nov 2 multiline starter is in beginning
 append line
 multiline starter is not in beginning 15:04:06 18 Nov 2
 append line`
@@ -464,7 +515,7 @@ append line`
 		FilePath:              tmpfile.Name(),
 		FromBeginning:         true,
 		TimestampRegex:        "(\\d{2}:\\d{2}:\\d{2} \\d{2} \\w{3} \\s{0,1}\\d{1,2})",
-		TimestampLayout:       "15:04:05 06 Jan 2",
+		TimestampLayout:       []string{"15:04:05 06 Jan 2"},
 		MultiLineStartPattern: "{timestamp_regex}",
 		Timezone:              time.UTC.String(),
 	}}
@@ -482,7 +533,7 @@ append line`
 		evts <- e
 	})
 
-	e1 := "15:04:05 18 Nov 2 multiline starter is in begining\nappend line"
+	e1 := "15:04:05 18 Nov 2 multiline starter is in beginning\nappend line"
 	et1 := time.Unix(1541171045, 0)
 	e2 := "multiline starter is not in beginning 15:04:06 18 Nov 2\nappend line"
 	et2 := time.Unix(1541171046, 0)
@@ -615,7 +666,7 @@ func TestLogsFileWithOffset(t *testing.T) {
 	defer os.Remove(tmpfile.Name())
 	require.NoError(t, err)
 
-	stateDir, err := ioutil.TempDir("", "state")
+	stateDir, err := os.MkdirTemp("", "state")
 	require.NoError(t, err)
 	defer os.Remove(stateDir)
 
@@ -665,7 +716,7 @@ func TestLogsFileWithInvalidOffset(t *testing.T) {
 	defer os.Remove(tmpfile.Name())
 	require.NoError(t, err)
 
-	stateDir, err := ioutil.TempDir("", "state")
+	stateDir, err := os.MkdirTemp("", "state")
 	require.NoError(t, err)
 	defer os.Remove(stateDir)
 
@@ -705,8 +756,13 @@ func TestLogsFileWithInvalidOffset(t *testing.T) {
 	tt.Stop()
 }
 
+// TestLogsFileRecreate verifies that if a LogSrc matching a LogConfig is detected,
+// We only receive log lines beginning at the offset specified in the corresponding state-file.
+// And if the file happens to get deleted and recreated we expect to receive log lines
+// from the beginning of the file. See https://github.com/aws/amazon-cloudwatch-agent/issues/447
 func TestLogsFileRecreate(t *testing.T) {
 	multilineWaitPeriod = 10 * time.Millisecond
+
 	logEntryString := "xxxxxxxxxxContentAfterOffset"
 	expectedContent := "ContentAfterOffset"
 
@@ -716,14 +772,17 @@ func TestLogsFileRecreate(t *testing.T) {
 	_, err = tmpfile.WriteString(logEntryString + "\n")
 	require.NoError(t, err)
 
-	stateDir, err := ioutil.TempDir("", "state")
+	stateDir, err := os.MkdirTemp("", "state")
 	require.NoError(t, err)
 	defer os.Remove(stateDir)
 
 	stateFileName := filepath.Join(stateDir, escapeFilePath(tmpfile.Name()))
-	stateFile, err := os.OpenFile(stateFileName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	stateFile, err := os.OpenFile(stateFileName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644)
 	require.NoError(t, err)
 	_, err = stateFile.WriteString("10")
+	require.NoError(t, err)
+	err = stateFile.Close()
+	require.NoError(t, err)
 	defer os.Remove(stateFileName)
 
 	tt := NewLogFile()
@@ -753,7 +812,8 @@ func TestLogsFileRecreate(t *testing.T) {
 		err = os.Remove(tmpfile.Name())
 		require.NoError(t, err)
 		require.NoError(t, tmpfile.Close())
-		time.Sleep(time.Millisecond * 100)
+		// 100 ms between deleting and recreating is enough on Linux and MacOS, but not Windows.
+		time.Sleep(time.Second * 1)
 		tmpfile, err = os.OpenFile(tmpfile.Name(), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 		require.NoError(t, err)
 
@@ -768,14 +828,17 @@ func TestLogsFileRecreate(t *testing.T) {
 	}
 	defer lsrc.Stop()
 
-	for {
+	// Waiting 10 seconds for the recreated temp file to be detected is plenty sufficient on any OS.
+	for start := time.Now(); time.Since(start) < 10*time.Second; {
 		lsrcs = tt.FindLogSrc()
 		if len(lsrcs) > 0 {
 			break
 		}
 		time.Sleep(1 * time.Second)
 	}
-
+	if len(lsrcs) != 1 {
+		t.Fatalf("%v log src was returned when 1 should be available", len(lsrcs))
+	}
 	lsrc = lsrcs[0]
 	lsrc.SetOutput(func(e logs.LogEvent) {
 		if e != nil {
@@ -783,9 +846,11 @@ func TestLogsFileRecreate(t *testing.T) {
 		}
 	})
 
+	// after the file gets deleted, the state file should be deleted too, so
+	// the tailer should start from the beginning.
 	e = <-evts
-	if e.Message() != expectedContent {
-		t.Errorf("Wrong log found after file replacement: \n% x\nExpecting:\n% x\n", e.Message(), expectedContent)
+	if e.Message() != logEntryString {
+		t.Errorf("Wrong log found after file replacement: \n% x\nExpecting:\n% x\n", e.Message(), logEntryString)
 	}
 
 	lsrc.Stop()
@@ -842,7 +907,7 @@ func TestLogsPartialLineReading(t *testing.T) {
 func TestLogFileMultiLogsReading(t *testing.T) {
 	multilineWaitPeriod = 10 * time.Millisecond
 	logEntryString := "This is from Agent log"
-	dir, e := ioutil.TempDir("", "test")
+	dir, e := os.MkdirTemp("", "test")
 	require.NoError(t, e)
 	defer os.Remove(dir)
 	agentLog, err := createTempFile(dir, "test_agent.log")
@@ -905,7 +970,7 @@ func TestLogFileMultiLogsReading(t *testing.T) {
 func TestLogFileMultiLogsReadingAddingFile(t *testing.T) {
 	multilineWaitPeriod = 10 * time.Millisecond
 	logEntryString := "This is from Agent log"
-	dir, e := ioutil.TempDir("", "test")
+	dir, e := os.MkdirTemp("", "test")
 	require.NoError(t, e)
 	defer os.Remove(dir)
 

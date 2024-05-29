@@ -8,14 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/aws/amazon-cloudwatch-agent/plugins/inputs/logfile/tail/watch"
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/models"
 	"gopkg.in/tomb.v1"
+
+	"github.com/aws/amazon-cloudwatch-agent/plugins/inputs/logfile/tail/watch"
 )
 
 var (
@@ -23,6 +25,7 @@ var (
 	ErrDeletedNotReOpen         = errors.New("File was deleted, tail should now stop")
 	exitOnDeletionCheckDuration = time.Minute
 	exitOnDeletionWaitDuration  = 5 * time.Minute
+	OpenFileCount               atomic.Int64
 )
 
 type Line struct {
@@ -43,18 +46,6 @@ type SeekInfo struct {
 	Whence int // os.SEEK_*
 }
 
-type logger interface {
-	Fatal(v ...interface{})
-	Fatalf(format string, v ...interface{})
-	Fatalln(v ...interface{})
-	Panic(v ...interface{})
-	Panicf(format string, v ...interface{})
-	Panicln(v ...interface{})
-	Print(v ...interface{})
-	Printf(format string, v ...interface{})
-	Println(v ...interface{})
-}
-
 type limiter interface {
 	Pour(uint16) bool
 }
@@ -73,9 +64,7 @@ type Config struct {
 	Follow      bool // Continue looking for new lines (tail -f)
 	MaxLineSize int  // If non-zero, split longer lines into multiple lines
 
-	// Logger, when nil, is set to tail.DefaultLogger
-	// To disable logging: set field to tail.DiscardingLogger
-	Logger logger
+	Logger telegraf.Logger
 
 	// Special handling for utf16
 	IsUTF16 bool
@@ -94,16 +83,12 @@ type Tail struct {
 
 	curOffset int64
 	tomb.Tomb // provides: Done, Kill, Dying
+	dropCnt   int
 
 	lk sync.Mutex
-}
 
-var (
-	// DefaultLogger is used when Config.Logger == nil
-	DefaultLogger = log.New(os.Stderr, "", log.LstdFlags)
-	// DiscardingLogger can be used to disable logging output
-	DiscardingLogger = log.New(ioutil.Discard, "", 0)
-)
+	FileDeletedCh chan bool
+}
 
 // TailFile begins tailing the file. Output stream is made available
 // via the `Tail.Lines` channel. To handle errors during tailing,
@@ -115,14 +100,15 @@ func TailFile(filename string, config Config) (*Tail, error) {
 	}
 
 	t := &Tail{
-		Filename: filename,
-		Lines:    make(chan *Line),
-		Config:   config,
+		Filename:      filename,
+		Lines:         make(chan *Line),
+		Config:        config,
+		FileDeletedCh: make(chan bool),
 	}
 
-	// when Logger was not specified in config, use default logger
+	// when Logger was not specified in config, create new one
 	if t.Logger == nil {
-		t.Logger = log.New(os.Stderr, "", log.LstdFlags)
+		t.Logger = models.NewLogger("inputs", "tail", "")
 	}
 
 	if t.Poll {
@@ -137,6 +123,7 @@ func TailFile(filename string, config Config) (*Tail, error) {
 		if err != nil {
 			return nil, err
 		}
+		OpenFileCount.Add(1)
 	}
 
 	if !config.ReOpen {
@@ -178,14 +165,17 @@ func (tail *Tail) Stop() error {
 }
 
 // StopAtEOF stops tailing as soon as the end of the file is reached.
-func (tail *Tail) StopAtEOF() error {
+// Does not wait until tailer is dead.
+func (tail *Tail) StopAtEOF() {
 	tail.Kill(errStopAtEOF)
-	return tail.Wait()
 }
 
 var errStopAtEOF = errors.New("tail: stop at eof")
 
 func (tail *Tail) close() {
+	if tail.dropCnt > 0 {
+		tail.Logger.Errorf("Dropped %v lines for stopped tail for file %v", tail.dropCnt, tail.Filename)
+	}
 	close(tail.Lines)
 	tail.closeFile()
 }
@@ -194,6 +184,7 @@ func (tail *Tail) closeFile() {
 	if tail.file != nil {
 		tail.file.Close()
 		tail.file = nil
+		OpenFileCount.Add(-1)
 	}
 }
 
@@ -205,7 +196,7 @@ func (tail *Tail) reopen() error {
 		tail.curOffset = 0
 		if err != nil {
 			if os.IsNotExist(err) {
-				tail.Logger.Printf("Waiting for %s to appear...", tail.Filename)
+				tail.Logger.Debugf("Waiting for %s to appear...", tail.Filename)
 				if err := tail.watcher.BlockUntilExists(&tail.Tomb); err != nil {
 					if err == tomb.ErrDying {
 						return err
@@ -218,6 +209,7 @@ func (tail *Tail) reopen() error {
 		}
 		break
 	}
+	OpenFileCount.Add(1)
 	return nil
 }
 
@@ -339,7 +331,7 @@ func (tail *Tail) tailFileSync() {
 	// Seek to requested location on first open of the file.
 	if tail.Location != nil {
 		err := tail.seekTo(*tail.Location)
-		tail.Logger.Printf("Seeked %s - %+v\n", tail.Filename, tail.Location)
+		tail.Logger.Debugf("Seeked %s - %+v\n", tail.Filename, tail.Location)
 		if err != nil {
 			tail.Killf("Seek error on %s: %s", tail.Filename, err)
 			return
@@ -402,12 +394,13 @@ func (tail *Tail) tailFileSync() {
 			err := tail.waitForChanges()
 			if err != nil {
 				if err == ErrDeletedNotReOpen {
+					close(tail.FileDeletedCh)
 					for {
 						line, errReadLine := tail.readLine()
 						if errReadLine == nil {
 							tail.sendLine(line, tail.curOffset)
 						} else {
-							break
+							return
 						}
 					}
 				} else if err != ErrStop {
@@ -459,31 +452,29 @@ func (tail *Tail) waitForChanges() error {
 	case <-tail.changes.Deleted:
 		tail.changes = nil
 		if tail.ReOpen {
-			// XXX: we must not log from a library.
-			tail.Logger.Printf("Re-opening moved/deleted file %s ...", tail.Filename)
+			tail.Logger.Infof("Re-opening moved/deleted file %s ...", tail.Filename)
 			if err := tail.reopen(); err != nil {
 				return err
 			}
-			tail.Logger.Printf("Successfully reopened %s", tail.Filename)
+			tail.Logger.Debugf("Successfully reopened %s", tail.Filename)
 			tail.openReader()
 			return nil
 		} else {
-			tail.Logger.Printf("Stopping tail as file no longer exists: %s", tail.Filename)
+			tail.Logger.Warnf("Stopping tail as file no longer exists: %s", tail.Filename)
 			return ErrDeletedNotReOpen
 		}
 	case <-tail.changes.Truncated:
 		// Always reopen truncated files (Follow is true)
-		tail.Logger.Printf("Re-opening truncated file %s ...", tail.Filename)
+		tail.Logger.Infof("Re-opening truncated file %s ...", tail.Filename)
 		if err := tail.reopen(); err != nil {
 			return err
 		}
-		tail.Logger.Printf("Successfully reopened truncated %s", tail.Filename)
+		tail.Logger.Debugf("Successfully reopened truncated %s", tail.Filename)
 		tail.openReader()
 		return nil
 	case <-tail.Dying():
 		return ErrStop
 	}
-	panic("unreachable")
 }
 
 func (tail *Tail) openReader() {
@@ -523,19 +514,25 @@ func (tail *Tail) sendLine(line string, offset int64) bool {
 		lines = partitionString(line, tail.MaxLineSize)
 	}
 
-	for _, line := range lines {
+	for i, line := range lines {
 		// This select is to avoid blockage on the tail.Lines chan
 		select {
 		case tail.Lines <- &Line{line, now, nil, offset}:
 		case <-tail.Dying():
-			return true
+			if tail.Err() == errStopAtEOF {
+				// Try sending, even if it blocks.
+				tail.Lines <- &Line{line, now, nil, offset}
+			} else {
+				tail.dropCnt += len(lines) - i
+				return true
+			}
 		}
 	}
 
 	if tail.Config.RateLimiter != nil {
 		ok := tail.Config.RateLimiter.Pour(uint16(len(lines)))
 		if !ok {
-			tail.Logger.Printf("Leaky bucket full (%v); entering 1s cooloff period.\n",
+			tail.Logger.Debugf("Leaky bucket full (%v); entering 1s cooloff period.\n",
 				tail.Filename)
 			return false
 		}
@@ -595,7 +592,7 @@ func (tail *Tail) exitOnDeletion() {
 				case <-time.After(exitOnDeletionWaitDuration):
 					// wait for some time in case tail can catch up with the EOF
 					msg := fmt.Sprintf("File %s was deleted, but file content is not tailed completely.", tail.Filename)
-					tail.Logger.Println(msg)
+					tail.Logger.Error(msg)
 					tail.Kill(errors.New(msg))
 					return
 				}
@@ -610,7 +607,7 @@ func (tail *Tail) exitOnDeletion() {
 // with the last chunk of variable size.
 func partitionString(s string, chunkSize int) []string {
 	if chunkSize <= 0 {
-		panic("invalid chunkSize")
+		panic("Invalid chunkSize")
 	}
 	length := len(s)
 	chunks := 1 + length/chunkSize

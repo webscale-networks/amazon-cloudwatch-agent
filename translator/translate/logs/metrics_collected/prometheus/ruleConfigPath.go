@@ -1,11 +1,9 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT
 
-package emfprocessor
+package prometheus
 
 import (
-	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"strings"
@@ -34,7 +32,7 @@ type ConfigPath struct {
 func splitConfigPath(configPath string) string {
 	locationArray := strings.SplitN(configPath, sourceSeparator, 2)
 	if locationArray == nil || len(locationArray) < 2 {
-		panic(fmt.Sprintf("Prometheus config path: %s is malformated.\n", configPath))
+		log.Panicf("Prometheus config path: %s is malformated.", configPath)
 	}
 
 	return locationArray[1]
@@ -45,9 +43,6 @@ func getDownloadPath() string {
 		var downloadingPath string
 		if _, ok := os.LookupEnv("ProgramData"); ok {
 			downloadingPath = os.Getenv("ProgramData")
-		} else {
-			// Windows 2003
-			downloadingPath = os.Getenv("ALLUSERSPROFILE") + "\\Application Data"
 		}
 		return downloadingPath + windowsDownloadingFile
 	}
@@ -66,13 +61,13 @@ func (obj *ConfigPath) ApplyRule(input interface{}) (string, interface{}) {
 		downloadingPath := getDownloadPath()
 		configEnv := splitConfigPath(configPath)
 		if cc, ok := os.LookupEnv(configEnv); ok {
-			if error := ioutil.WriteFile(downloadingPath, []byte(cc), yamlFileMode); error != nil {
-				panic(fmt.Sprintf("Failed to download the Prometheus config yaml file. Reason: %s \n", error.Error()))
+			if error := os.WriteFile(downloadingPath, []byte(cc), yamlFileMode); error != nil {
+				log.Panicf("Failed to download the Prometheus config yaml file. Reason: %s", error.Error())
 			} else {
 				log.Printf("Downloaded the prometheus config from ENV: %v.", configEnv)
 			}
 		} else {
-			panic(fmt.Sprintf("Failed to download the Prometheus config yaml from ENV: %v. Reason: ENV does not exist \n", configEnv))
+			log.Panicf("Failed to download the Prometheus config yaml from ENV: %v. Reason: ENV does not exist", configEnv)
 		}
 		return SectionKeyConfigPath, downloadingPath
 	}

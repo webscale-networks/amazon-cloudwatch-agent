@@ -5,10 +5,11 @@ package rollup_dimensions
 
 import (
 	"encoding/json"
-	"github.com/aws/amazon-cloudwatch-agent/translator"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/aws/amazon-cloudwatch-agent/translator"
 )
 
 func TestRollupDimensions(t *testing.T) {
@@ -56,16 +57,16 @@ func TestInvalidRollupList(t *testing.T) {
     }`),
 	}
 	for _, testInput := range testInputs {
-		e := json.Unmarshal(testInput, &tmp)
-		if e != nil {
-			panic(e)
+		err := json.Unmarshal(testInput, &tmp)
+		if err != nil {
+			panic(err)
 		}
 		if im, ok := tmp.(map[string]interface{}); ok {
 			actualVal = im[SectionKey]
 		} else {
 			t.FailNow()
 		}
-		assert.Equal(t, false, isValidRollupList(actualVal), "Expect to be false")
+		assert.Equal(t, false, IsValidRollupList(actualVal), "Expect to be false")
 	}
 	assert.Equal(t, len(testInputs), len(translator.ErrorMessages), "Expect one Error message")
 }
@@ -85,7 +86,7 @@ func TestValidRollupList(t *testing.T) {
 	}
 
 	if err == nil {
-		assert.Equal(t, true, isValidRollupList(actualVal), "Expect to be true")
+		assert.Equal(t, true, IsValidRollupList(actualVal), "Expect to be true")
 	} else {
 		panic(err)
 	}

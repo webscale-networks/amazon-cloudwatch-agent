@@ -1,0 +1,107 @@
+exporters:
+    awsxray:
+        certificate_file_path: ""
+        endpoint: ""
+        imds_retries: 2
+        index_all_attributes: false
+        local_mode: false
+        max_retries: 2
+        middleware: agenthealth/traces
+        no_verify_ssl: false
+        num_workers: 8
+        profile: default
+        proxy_address: ""
+        region: us-west-2
+        request_timeout_seconds: 30
+        resource_arn: ""
+        role_arn: ""
+        shared_credentials_file:
+            - /root/.aws/credentials
+        telemetry:
+            enabled: true
+            include_metadata: true
+extensions:
+    agenthealth/traces:
+        is_usage_data_enabled: true
+        stats:
+            operations:
+                - PutTraceSegments
+            usage_flags:
+                mode: EC2
+                region_type: ACJ
+processors:
+    batch/xray:
+        metadata_cardinality_limit: 1000
+        send_batch_max_size: 0
+        send_batch_size: 8192
+        timeout: 200ms
+receivers:
+    awsxray:
+        endpoint: 127.0.0.1:2000
+        dialer:
+            timeout: "0s"
+        proxy_server:
+            aws_endpoint: ""
+            certificate_file_path: ""
+            dialer:
+                timeout: "0s"
+            endpoint: 127.0.0.1:2000
+            imds_retries: 2
+            local_mode: false
+            profile: default
+            proxy_address: ""
+            region: us-west-2
+            role_arn: ""
+            service_name: "xray"
+            shared_credentials_file:
+                - /root/.aws/credentials
+        transport: udp
+    otlp/traces:
+        protocols:
+            grpc:
+                dialer:
+                    timeout: "0s"
+                endpoint: 127.0.0.1:4317
+                include_metadata: false
+                max_concurrent_streams: 0
+                max_recv_msg_size_mib: 0
+                read_buffer_size: 524288
+                transport: tcp
+                write_buffer_size: 0
+            http:
+                endpoint: 127.0.0.1:4318
+                include_metadata: false
+                logs_url_path: /v1/logs
+                max_request_body_size: 0
+                metrics_url_path: /v1/metrics
+                traces_url_path: /v1/traces
+service:
+    extensions:
+        - agenthealth/traces
+    pipelines:
+        traces/xray:
+            exporters:
+                - awsxray
+            processors:
+                - batch/xray
+            receivers:
+                - awsxray
+                - otlp/traces
+    telemetry:
+        logs:
+            development: false
+            disable_caller: false
+            disable_stacktrace: false
+            encoding: console
+            level: info
+            output_paths:
+                - /opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log
+            sampling:
+                enabled: true
+                initial: 2
+                thereafter: 500
+                tick: 10s
+        metrics:
+            address: ""
+            level: None
+        traces: {}

@@ -9,19 +9,20 @@ import (
 	"testing"
 	"time"
 
-	. "github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
-	"github.com/aws/amazon-cloudwatch-agent/internal/structuredlogscommon"
 	"github.com/influxdata/telegraf/metric"
 	"github.com/stretchr/testify/assert"
+
+	. "github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
+	"github.com/aws/amazon-cloudwatch-agent/internal/structuredlogscommon"
 )
 
 func TestNodeFull(t *testing.T) {
-	tags := map[string]string{MetricType: TypeInstance, InstanceId: "TestEC2InstanceId", ContainerInstanceIdKey: "TestContainerInstanceId", ClusterNameKey: "TestClusterName"}
+	tags := map[string]string{MetricType: TypeInstance, InstanceIdKey: "TestEC2InstanceId", ContainerInstanceIdKey: "TestContainerInstanceId", ClusterNameKey: "TestClusterName"}
 	fields := map[string]interface{}{MetricName(TypeInstance, CpuUtilization): 0, MetricName(TypeInstance, MemUtilization): 0,
 		MetricName(TypeInstance, NetTotalBytes): 0, MetricName(TypeInstance, CpuReservedCapacity): 0, MetricName(TypeInstance, MemReservedCapacity): 0,
 		MetricName(TypeInstance, RunningTaskCount): 0, MetricName(TypeInstance, CpuTotal): 0,
 		MetricName(TypeInstance, CpuLimit): 0, MetricName(TypeInstance, MemWorkingset): 0, MetricName(TypeInstance, MemLimit): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	new(ECSDecorator).tagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 	expected := []structuredlogscommon.MetricRule{}
@@ -30,12 +31,12 @@ func TestNodeFull(t *testing.T) {
 }
 
 func TestNodeLackOfCpuUtilization(t *testing.T) {
-	tags := map[string]string{MetricType: TypeInstance, InstanceId: "TestEC2InstanceId", ContainerInstanceIdKey: "TestContainerInstanceId", ClusterNameKey: "TestClusterName"}
+	tags := map[string]string{MetricType: TypeInstance, InstanceIdKey: "TestEC2InstanceId", ContainerInstanceIdKey: "TestContainerInstanceId", ClusterNameKey: "TestClusterName"}
 	fields := map[string]interface{}{MetricName(TypeInstance, MemUtilization): 0,
 		MetricName(TypeInstance, NetTotalBytes): 0, MetricName(TypeInstance, CpuReservedCapacity): 0, MetricName(TypeInstance, MemReservedCapacity): 0,
 		MetricName(TypeInstance, RunningTaskCount): 0, MetricName(TypeInstance, CpuTotal): 0,
 		MetricName(TypeInstance, CpuLimit): 0, MetricName(TypeInstance, MemWorkingset): 0, MetricName(TypeInstance, MemLimit): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	new(ECSDecorator).tagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 
@@ -52,7 +53,7 @@ func TestNodeLackOfInstanceId(t *testing.T) {
 		MetricName(TypeInstance, NetTotalBytes): 0, MetricName(TypeInstance, CpuReservedCapacity): 0, MetricName(TypeInstance, MemReservedCapacity): 0,
 		MetricName(TypeInstance, RunningTaskCount): 0, MetricName(TypeInstance, CpuTotal): 0,
 		MetricName(TypeInstance, CpuLimit): 0, MetricName(TypeInstance, MemWorkingset): 0, MetricName(TypeInstance, MemLimit): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	new(ECSDecorator).tagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 
@@ -63,9 +64,9 @@ func TestNodeLackOfInstanceId(t *testing.T) {
 }
 
 func TestNodeFSFull(t *testing.T) {
-	tags := map[string]string{MetricType: TypeInstanceFS, InstanceId: "TestEC2InstanceId", ContainerInstanceIdKey: "TestContainerInstanceId", ClusterNameKey: "TestClusterName"}
+	tags := map[string]string{MetricType: TypeInstanceFS, InstanceIdKey: "TestEC2InstanceId", ContainerInstanceIdKey: "TestContainerInstanceId", ClusterNameKey: "TestClusterName"}
 	fields := map[string]interface{}{MetricName(TypeInstanceFS, FSUtilization): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	new(ECSDecorator).tagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 

@@ -9,7 +9,10 @@ import (
 	"log"
 	"time"
 
+	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/config"
+
+	"github.com/aws/amazon-cloudwatch-agent/plugins/inputs/logfile/tail"
 )
 
 var ErrOutputStopped = errors.New("Output plugin stopped")
@@ -17,6 +20,7 @@ var ErrOutputStopped = errors.New("Output plugin stopped")
 // A LogCollection is a collection of LogSrc, a plugin which can provide many LogSrc
 type LogCollection interface {
 	FindLogSrc() []LogSrc
+	Start(acc telegraf.Accumulator) error
 }
 
 type LogEvent interface {
@@ -33,38 +37,42 @@ type LogSrc interface {
 	Stream() string
 	Destination() string
 	Description() string
+	Retention() int
+	Class() string
 	Stop()
 }
 
 // A LogBackend is able to return a LogDest of a given name.
 // The same name should always return the same LogDest.
 type LogBackend interface {
-	CreateDest(string, string) LogDest
+	CreateDest(string, string, int, string) LogDest
 }
 
 // A LogDest represents a final endpoint where log events are published to.
-// e.g. a particualr log stream in cloudwatchlogs.
+// e.g. a particular log stream in cloudwatchlogs.
 type LogDest interface {
 	Publish(events []LogEvent) error
 }
 
 // LogAgent is the agent handles pure log pipelines
 type LogAgent struct {
-	Config      *config.Config
-	backends    map[string]LogBackend
-	destNames   map[LogDest]string
-	collections []LogCollection
+	Config                    *config.Config
+	backends                  map[string]LogBackend
+	destNames                 map[LogDest]string
+	collections               []LogCollection
+	retentionAlreadyAttempted map[string]bool
 }
 
 func NewLogAgent(c *config.Config) *LogAgent {
 	return &LogAgent{
-		Config:    c,
-		backends:  make(map[string]LogBackend),
-		destNames: make(map[LogDest]string),
+		Config:                    c,
+		backends:                  make(map[string]LogBackend),
+		destNames:                 make(map[LogDest]string),
+		retentionAlreadyAttempted: make(map[string]bool),
 	}
 }
 
-// LogAgent will scan all input and output plugins for LogCollection and LogBackend.
+// Run LogAgent will scan all input and output plugins for LogCollection and LogBackend.
 // And connect all the LogSrc from the LogCollection found to the respective LogDest
 // based on the configured "destination", and "name"
 func (l *LogAgent) Run(ctx context.Context) {
@@ -85,6 +93,10 @@ func (l *LogAgent) Run(ctx context.Context) {
 	for _, input := range l.Config.Inputs {
 		if collection, ok := input.Input.(LogCollection); ok {
 			log.Printf("I! [logagent] found plugin %v is a log collection", input.Config.Name)
+			err := collection.Start(nil)
+			if err != nil {
+				log.Printf("E! could not start log collection %v err %v", input.Config.Name, err)
+			}
 			l.collections = append(l.collections, collection)
 		}
 	}
@@ -94,18 +106,25 @@ func (l *LogAgent) Run(ctx context.Context) {
 	for {
 		select {
 		case <-t.C:
+			log.Printf("D! [logagent] open file count, %v", tail.OpenFileCount.Load())
 			for _, c := range l.collections {
 				srcs := c.FindLogSrc()
 				for _, src := range srcs {
 					dname := src.Destination()
+					logGroup := src.Group()
+					logStream := src.Stream()
+					description := src.Description()
+					retention := src.Retention()
+					logGroupClass := src.Class()
 					backend, ok := l.backends[dname]
 					if !ok {
-						log.Printf("E! [logagent] Failed to find destination %v for log source %v/%v(%v) ", dname, src.Group(), src.Stream(), src.Description())
+						log.Printf("E! [logagent] Failed to find destination %s for log source %s/%s(%s) ", dname, logGroup, logStream, description)
 						continue
 					}
-					dest := backend.CreateDest(src.Group(), src.Stream())
+					retention = l.checkRetentionAlreadyAttempted(retention, logGroup)
+					dest := backend.CreateDest(logGroup, logStream, retention, logGroupClass)
 					l.destNames[dest] = dname
-					log.Printf("I! [logagent] piping log from %v/%v(%v) to %v", src.Group(), src.Stream(), src.Description(), dname)
+					log.Printf("I! [logagent] piping log from %s/%s(%s) to %s with retention %d", logGroup, logStream, description, dname, retention)
 					go l.runSrcToDest(src, dest)
 				}
 			}
@@ -139,4 +158,15 @@ func (l *LogAgent) runSrcToDest(src LogSrc, dest LogDest) {
 			return
 		}
 	}
+}
+
+func (l *LogAgent) checkRetentionAlreadyAttempted(retention int, logGroup string) int {
+	if retention > 0 && l.retentionAlreadyAttempted[logGroup] {
+		log.Printf("D! [logagent] Retention already set for log group %s, current retention %d", logGroup, retention)
+		retention = -1
+	} else if retention > 0 {
+		log.Printf("I! First time setting retention for log group %s, update map to avoid setting twice", logGroup)
+		l.retentionAlreadyAttempted[logGroup] = true
+	}
+	return retention
 }

@@ -6,7 +6,6 @@ package logfile
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,12 +13,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/plugins/inputs"
+
 	"github.com/aws/amazon-cloudwatch-agent/internal/logscommon"
 	"github.com/aws/amazon-cloudwatch-agent/logs"
 	"github.com/aws/amazon-cloudwatch-agent/plugins/inputs/logfile/globpath"
 	"github.com/aws/amazon-cloudwatch-agent/plugins/inputs/logfile/tail"
-	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
 type LogFile struct {
@@ -73,7 +73,7 @@ const sampleConfig = `
       log_stream_name = "<log_stream_name>"
       publish_multi_logs = false
       timestamp_regex = "^(\\d{2} \\w{3} \\d{4} \\d{2}:\\d{2}:\\d{2}).*$"
-      timestamp_layout = "02 Jan 2006 15:04:05"
+      timestamp_layout = ["_2 Jan 2006 15:04:05"]
       timezone = "UTC"
       multi_line_start_pattern = "{timestamp_regex}"
       ## Read file from beginning.
@@ -107,8 +107,9 @@ func (t *LogFile) Start(acc telegraf.Accumulator) error {
 		return fmt.Errorf("failed to create state file directory %s: %v", t.FileStateFolder, err)
 	}
 
-	// Clean state file regularly
+	// Clean state file on init and regularly
 	go func() {
+		t.cleanupStateFolder()
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for {
@@ -125,11 +126,12 @@ func (t *LogFile) Start(acc telegraf.Accumulator) error {
 	// Initialize all the file configs
 	for i := range t.FileConfig {
 		if err := t.FileConfig[i].init(); err != nil {
-			return err
+			return fmt.Errorf("invalid file config init %v with err %v", t.FileConfig[i], err)
 		}
 	}
 
 	t.started = true
+	t.Log.Infof("turned on logs plugin")
 	return nil
 }
 
@@ -139,9 +141,10 @@ func (t *LogFile) Stop() {
 	close(t.done)
 }
 
-//Try to find if there is any new file needs to be added for monitoring.
+// Try to find if there is any new file needs to be added for monitoring.
 func (t *LogFile) FindLogSrc() []logs.LogSrc {
 	if !t.started {
+		t.Log.Warn("not started with file state folder %s", t.FileStateFolder)
 		return nil
 	}
 
@@ -152,12 +155,10 @@ func (t *LogFile) FindLogSrc() []logs.LogSrc {
 	// Create a "tailer" for each file
 	for i := range t.FileConfig {
 		fileconfig := &t.FileConfig[i]
-
 		targetFiles, err := t.getTargetFiles(fileconfig)
 		if err != nil {
 			t.Log.Errorf("Failed to find target files for file config %v, with error: %v", fileconfig.FilePath, err)
 		}
-
 		for _, filename := range targetFiles {
 			dests, ok := t.configs[fileconfig]
 			if !ok {
@@ -167,9 +168,11 @@ func (t *LogFile) FindLogSrc() []logs.LogSrc {
 
 			if _, ok := dests[filename]; ok {
 				continue
-			} else if fileconfig.AutoRemoval { // This logic means auto_removal does not work with public_multi_logs
+			} else if fileconfig.AutoRemoval {
+				// This logic means auto_removal does not work with publish_multi_logs
 				for _, dst := range dests {
-					dst.tailer.StopAtEOF() // Stop all other tailers in favor of the newly found file
+					// Stop all other tailers in favor of the newly found file
+					dst.tailer.StopAtEOF()
 				}
 			}
 
@@ -230,13 +233,16 @@ func (t *LogFile) FindLogSrc() []logs.LogSrc {
 				groupName, streamName,
 				t.Destination,
 				t.getStateFilePath(filename),
+				fileconfig.LogGroupClass,
 				tailer,
 				fileconfig.AutoRemoval,
 				mlCheck,
+				fileconfig.Filters,
 				fileconfig.timestampFromLogLine,
 				fileconfig.Enc,
 				fileconfig.MaxEventSize,
 				fileconfig.TruncateSuffix,
+				fileconfig.RetentionInDays,
 			)
 
 			src.AddCleanUpFn(func(ts *tailerSrc) func() {
@@ -309,7 +315,7 @@ func (t *LogFile) getTargetFiles(fileconfig *FileConfig) ([]string, error) {
 	return targetFileList, nil
 }
 
-//The plugin will look at the state folder, and restore the offset of the file seeked if such state exists.
+// The plugin will look at the state folder, and restore the offset of the file seeked if such state exists.
 func (t *LogFile) restoreState(filename string) (int64, error) {
 	filePath := t.getStateFilePath(filename)
 
@@ -318,7 +324,7 @@ func (t *LogFile) restoreState(filename string) (int64, error) {
 		return 0, err
 	}
 
-	byteArray, err := ioutil.ReadFile(filePath)
+	byteArray, err := os.ReadFile(filePath)
 	if err != nil {
 		t.Log.Warnf("Issue encountered when reading offset from file %s: %v", filename, err)
 		return 0, err
@@ -330,8 +336,10 @@ func (t *LogFile) restoreState(filename string) (int64, error) {
 		return 0, err
 	}
 
+	if offset < 0 {
+		return 0, fmt.Errorf("negative state file offset, %v, %v", filePath, offset)
+	}
 	t.Log.Infof("Reading from offset %v in %s", offset, filename)
-
 	return offset, nil
 }
 
@@ -358,7 +366,7 @@ func (t *LogFile) cleanupStateFolder() {
 			continue
 		}
 
-		byteArray, err := ioutil.ReadFile(file)
+		byteArray, err := os.ReadFile(file)
 		if err != nil {
 			t.Log.Errorf("Error happens when reading the content from file %s in clean up state fodler step: %v", file, err)
 			continue

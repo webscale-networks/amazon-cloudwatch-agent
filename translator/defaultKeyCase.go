@@ -5,11 +5,22 @@ package translator
 
 import (
 	"fmt"
+	"strings"
 )
 
-//DefaultCase check if current input overrides the default value for the given config entry key.
+// DefaultCase check if current input overrides the default value for the given config entry key.
 func DefaultCase(key string, defaultVal, input interface{}) (returnKey string, returnVal interface{}) {
-	m := input.(map[string]interface{})
+	m, ok := input.(map[string]interface{})
+	if !ok {
+		// bypassing special formats like:
+		//		"procstat": [
+		//			{
+		//				"pid_file": "/var/run/example1.pid",
+		// 				...
+		returnKey = ""
+		returnVal = ""
+	}
+
 	if val, ok := m[key]; ok {
 		//The key is in current input instance, use the value in JSON.
 		returnVal = val
@@ -61,4 +72,32 @@ func DefaultStringArrayCase(key string, defaultVal, input interface{}) (returnKe
 			fmt.Sprintf("%s value (%v) in json is not valid as an array of strings.", key, returnVal))
 	}
 	return
+}
+
+func DefaultRetentionInDaysCase(key string, defaultVal, input interface{}) (returnKey string, returnVal interface{}) {
+	returnKey, returnVal = DefaultIntegralCase(key, defaultVal, input)
+	if intVal, ok := returnVal.(int); ok && IsValidRetentionDays(intVal) {
+		returnVal = intVal
+	} else {
+		returnVal = -1
+		AddErrorMessages(
+			fmt.Sprintf("Retention in Days key: %s", key),
+			fmt.Sprintf("%s value (%v) in is not valid retention in days.", key, returnVal))
+	}
+	return
+}
+
+func DefaultLogGroupClassCase(key string, defaultVal, input interface{}) (returnKey string, returnVal interface{}) {
+	returnKey, returnVal = DefaultCase(key, defaultVal, input)
+	if classVal, ok := returnVal.(string); ok && IsValidLogGroupClass(strings.ToUpper(classVal)) {
+		//CreateLogGroup API only accepts values STANDARD or INFREQUENT_ACCESS
+		returnVal = strings.ToUpper(classVal)
+	} else {
+		AddInfoMessages(
+			fmt.Sprintf("LogGroupClass key: %s", key),
+			fmt.Sprintf("%s value (%v) in is not a valid Log Group Class field. Agent will not set the LogGroupClass parameter.", key, returnVal))
+		returnVal = ""
+	}
+	return
+
 }

@@ -8,23 +8,23 @@ import (
 	"os"
 	"testing"
 
-	"github.com/aws/amazon-cloudwatch-agent/translator/util/ecsutil"
+	"github.com/stretchr/testify/assert"
 
 	"github.com/aws/amazon-cloudwatch-agent/translator/config"
 	"github.com/aws/amazon-cloudwatch-agent/translator/context"
 	"github.com/aws/amazon-cloudwatch-agent/translator/translate/agent"
-
-	"github.com/stretchr/testify/assert"
+	"github.com/aws/amazon-cloudwatch-agent/translator/util/ecsutil"
 )
 
 func TestLogs(t *testing.T) {
 	l := new(Logs)
 	agent.Global_Config.Region = "us-east-1"
+	agent.Global_Config.RegionType = "any"
 
 	var input interface{}
-	e := json.Unmarshal([]byte(`{"logs":{"log_stream_name":"LOG_STREAM_NAME"}}`), &input)
-	if e != nil {
-		assert.Fail(t, e.Error())
+	err := json.Unmarshal([]byte(`{"logs":{"log_stream_name":"LOG_STREAM_NAME"}}`), &input)
+	if err != nil {
+		assert.Fail(t, err.Error())
 	}
 
 	_, actual := l.ApplyRule(input)
@@ -33,10 +33,10 @@ func TestLogs(t *testing.T) {
 			"cloudwatchlogs": []interface{}{
 				map[string]interface{}{
 					"region":               "us-east-1",
+					"region_type":          "any",
+					"mode":                 "",
 					"log_stream_name":      "LOG_STREAM_NAME",
 					"force_flush_interval": "5s",
-					"tagexclude":           []string{"metricPath"},
-					"tagpass":              map[string][]string{"metricPath": {"logs"}},
 				},
 			},
 		},
@@ -47,11 +47,12 @@ func TestLogs(t *testing.T) {
 func TestLogs_LogStreamName(t *testing.T) {
 	l := new(Logs)
 	agent.Global_Config.Region = "us-east-1"
+	agent.Global_Config.RegionType = "any"
 
 	var input interface{}
-	e := json.Unmarshal([]byte(`{"logs":{}}`), &input)
-	if e != nil {
-		assert.Fail(t, e.Error())
+	err := json.Unmarshal([]byte(`{"logs":{}}`), &input)
+	if err != nil {
+		assert.Fail(t, err.Error())
 	}
 
 	ctx := context.CurrentContext()
@@ -64,10 +65,10 @@ func TestLogs_LogStreamName(t *testing.T) {
 			"cloudwatchlogs": []interface{}{
 				map[string]interface{}{
 					"region":               "us-east-1",
+					"region_type":          "any",
+					"mode":                 "OP",
 					"log_stream_name":      hostname,
 					"force_flush_interval": "5s",
-					"tagexclude":           []string{"metricPath"},
-					"tagpass":              map[string][]string{"metricPath": {"logs"}},
 				},
 			},
 		},
@@ -91,10 +92,10 @@ func TestLogs_LogStreamName(t *testing.T) {
 			"cloudwatchlogs": []interface{}{
 				map[string]interface{}{
 					"region":               "us-east-1",
+					"region_type":          "any",
+					"mode":                 "",
 					"log_stream_name":      "arn_aws_ecs_us-east-2_012345678910_task/cluster-name/9781c248-0edd-4cdb-9a93-f63cb662a5d3",
 					"force_flush_interval": "5s",
-					"tagexclude":           []string{"metricPath"},
-					"tagpass":              map[string][]string{"metricPath": {"logs"}},
 				},
 			},
 		},
@@ -115,10 +116,10 @@ func TestLogs_LogStreamName(t *testing.T) {
 			"cloudwatchlogs": []interface{}{
 				map[string]interface{}{
 					"region":               "us-east-1",
+					"region_type":          "any",
+					"mode":                 "",
 					"log_stream_name":      "demo-app-5ffc89b95c-jgnf6",
 					"force_flush_interval": "5s",
-					"tagexclude":           []string{"metricPath"},
-					"tagpass":              map[string][]string{"metricPath": {"logs"}},
 				},
 			},
 		},
@@ -132,11 +133,12 @@ func TestLogs_LogStreamName(t *testing.T) {
 func TestLogs_ForceFlushInterval(t *testing.T) {
 	l := new(Logs)
 	agent.Global_Config.Region = "us-east-1"
+	agent.Global_Config.RegionType = "any"
 
 	var input interface{}
-	e := json.Unmarshal([]byte(`{"logs":{"force_flush_interval":10}}`), &input)
-	if e != nil {
-		assert.Fail(t, e.Error())
+	err := json.Unmarshal([]byte(`{"logs":{"force_flush_interval":10}}`), &input)
+	if err != nil {
+		assert.Fail(t, err.Error())
 	}
 
 	ctx := context.CurrentContext()
@@ -149,10 +151,10 @@ func TestLogs_ForceFlushInterval(t *testing.T) {
 			"cloudwatchlogs": []interface{}{
 				map[string]interface{}{
 					"region":               "us-east-1",
+					"region_type":          "any",
+					"mode":                 "OP",
 					"log_stream_name":      hostname,
 					"force_flush_interval": "10s",
-					"tagexclude":           []string{"metricPath"},
-					"tagpass":              map[string][]string{"metricPath": {"logs"}},
 				},
 			},
 		},
@@ -166,11 +168,12 @@ func TestLogs_ForceFlushInterval(t *testing.T) {
 func TestLogs_EndpointOverride(t *testing.T) {
 	l := new(Logs)
 	agent.Global_Config.Region = "us-east-1"
+	agent.Global_Config.RegionType = "any"
 
 	var input interface{}
-	e := json.Unmarshal([]byte(`{"logs":{"endpoint_override":"https://logs-fips.us-east-1.amazonaws.com"}}`), &input)
-	if e != nil {
-		assert.Fail(t, e.Error())
+	err := json.Unmarshal([]byte(`{"logs":{"endpoint_override":"https://logs-fips.us-east-1.amazonaws.com"}}`), &input)
+	if err != nil {
+		assert.Fail(t, err.Error())
 	}
 
 	ctx := context.CurrentContext()
@@ -183,11 +186,11 @@ func TestLogs_EndpointOverride(t *testing.T) {
 			"cloudwatchlogs": []interface{}{
 				map[string]interface{}{
 					"region":               "us-east-1",
+					"region_type":          "any",
+					"mode":                 "OP",
 					"endpoint_override":    "https://logs-fips.us-east-1.amazonaws.com",
 					"log_stream_name":      hostname,
 					"force_flush_interval": "5s",
-					"tagexclude":           []string{"metricPath"},
-					"tagpass":              map[string][]string{"metricPath": {"logs"}},
 				},
 			},
 		},

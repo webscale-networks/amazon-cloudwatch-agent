@@ -5,12 +5,14 @@ package events
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/aws/amazon-cloudwatch-agent/tool/data"
 	"github.com/aws/amazon-cloudwatch-agent/tool/processors"
-	"github.com/aws/amazon-cloudwatch-agent/tool/processors/serialization"
+	"github.com/aws/amazon-cloudwatch-agent/tool/processors/tracesconfig"
 	"github.com/aws/amazon-cloudwatch-agent/tool/runtime"
 	"github.com/aws/amazon-cloudwatch-agent/tool/util"
+	"github.com/aws/amazon-cloudwatch-agent/translator"
 )
 
 const (
@@ -38,7 +40,7 @@ func (p *processor) Process(ctx *runtime.Context, config *data.Config) {
 }
 
 func (p *processor) NextProcessor(ctx *runtime.Context, config *data.Config) interface{} {
-	return serialization.Processor
+	return tracesconfig.Processor
 }
 
 func monitorEvents(ctx *runtime.Context, config *data.Config) {
@@ -74,6 +76,16 @@ func monitorEvents(ctx *runtime.Context, config *data.Config) {
 
 		logStreamName := util.AskWithDefault("Log stream name:", logStreamNameHint)
 
+		logGroupDefaultOption := 1
+		logGroupClass := util.Choice("Which log group class would you like to have for this log group?", logGroupDefaultOption, []string{util.StandardLogGroupClass, util.InfrequentAccessLogGroupClass})
+		if logGroupClass == util.StandardLogGroupClass {
+			logGroupClass = util.StandardLogGroupClass
+			logGroupDefaultOption = 1
+		} else {
+			logGroupClass = util.InfrequentAccessLogGroupClass
+			logGroupDefaultOption = 2
+		}
+
 		eventFormat := util.Choice("In which format do you want to store windows event to CloudWatch Logs?", eventFormatDefaultOption, []string{EventFormatXMLDescription, EventFormatPlainTextDescription})
 		if eventFormat == EventFormatXMLDescription {
 			eventFormat = EventFormatXML
@@ -82,8 +94,15 @@ func monitorEvents(ctx *runtime.Context, config *data.Config) {
 			eventFormat = EventFormatPlainText
 			eventFormatDefaultOption = 2
 		}
+		keys := translator.ValidRetentionInDays
+		retentionInDays := util.Choice("Log Group Retention in days", 1, keys)
+		retention := -1
 
-		logsConf.AddWindowsEvent(eventName, logGroupName, logStreamName, eventFormat, eventLevels)
+		i, err := strconv.Atoi(retentionInDays)
+		if err == nil {
+			retention = i
+		}
+		logsConf.AddWindowsEvent(eventName, logGroupName, logStreamName, eventFormat, eventLevels, retention, logGroupClass)
 
 		yes = util.Yes(fmt.Sprintf("Do you want to specify any additional %s to monitor?", WindowsEventLog))
 		if !yes {

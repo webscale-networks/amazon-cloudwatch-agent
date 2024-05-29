@@ -5,17 +5,14 @@ package agent
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 
-	"github.com/aws/amazon-cloudwatch-agent/logger"
-
-	"github.com/aws/amazon-cloudwatch-agent/translator"
-
-	"github.com/aws/amazon-cloudwatch-agent/translator/config"
-
-	"os"
-
 	"github.com/stretchr/testify/assert"
+
+	"github.com/aws/amazon-cloudwatch-agent/logger"
+	"github.com/aws/amazon-cloudwatch-agent/translator"
+	"github.com/aws/amazon-cloudwatch-agent/translator/config"
 )
 
 var httpProxy string
@@ -31,9 +28,9 @@ func agentDefaultConfig(t *testing.T, osType string) {
 	a := new(Agent)
 	translator.SetTargetPlatform(osType)
 	var input interface{}
-	e := json.Unmarshal([]byte(`{"agent":{"metrics_collection_interval":59, "region": "us-west-2"}}`), &input)
-	if e != nil {
-		assert.Fail(t, e.Error())
+	err := json.Unmarshal([]byte(`{"agent":{"metrics_collection_interval":59, "region": "us-west-2"}}`), &input)
+	if err != nil {
+		assert.Fail(t, err.Error())
 	}
 	_, val := a.ApplyRule(input)
 	agent := map[string]interface{}{
@@ -64,9 +61,9 @@ func agentSpecificConfig(t *testing.T, osType string) {
 	translator.SetTargetPlatform(osType)
 	a := new(Agent)
 	var input interface{}
-	e := json.Unmarshal([]byte(`{"agent":{"debug":true, "region": "us-west-2"}}`), &input)
-	if e != nil {
-		assert.Fail(t, e.Error())
+	err := json.Unmarshal([]byte(`{"agent":{"debug":true, "region": "us-west-2"}}`), &input)
+	if err != nil {
+		assert.Fail(t, err.Error())
 	}
 	_, val := a.ApplyRule(input)
 	agent := map[string]interface{}{
@@ -97,9 +94,9 @@ func noAgentConfig(t *testing.T, osType string) {
 	translator.SetTargetPlatform(osType)
 	a := new(Agent)
 	var input interface{}
-	e := json.Unmarshal([]byte(`{"agent":{"region": "us-west-2"}}`), &input)
-	if e != nil {
-		assert.Fail(t, e.Error())
+	err := json.Unmarshal([]byte(`{"agent":{"region": "us-west-2"}}`), &input)
+	if err != nil {
+		assert.Fail(t, err.Error())
 	}
 
 	_, val := a.ApplyRule(input)
@@ -131,9 +128,9 @@ func internal(t *testing.T, osType string) {
 	a := new(Agent)
 	translator.SetTargetPlatform(osType)
 	var input interface{}
-	e := json.Unmarshal([]byte(`{"agent":{"internal": true}}`), &input)
-	if e != nil {
-		assert.Fail(t, e.Error())
+	err := json.Unmarshal([]byte(`{"agent":{"internal": true}}`), &input)
+	if err != nil {
+		assert.Fail(t, err.Error())
 	}
 
 	agent := map[string]interface{}{
@@ -157,9 +154,9 @@ func internal(t *testing.T, osType string) {
 	assert.Equal(t, agent, val, "Expect to be equal")
 	assert.True(t, Global_Config.Internal)
 
-	e = json.Unmarshal([]byte(`{"agent":{"internal": false}}`), &input)
-	if e != nil {
-		assert.Fail(t, e.Error())
+	err = json.Unmarshal([]byte(`{"agent":{"internal": false}}`), &input)
+	if err != nil {
+		assert.Fail(t, err.Error())
 	}
 	_, val = a.ApplyRule(input)
 	assert.Equal(t, agent, val, "Expect to be equal")

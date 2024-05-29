@@ -9,19 +9,20 @@ import (
 	"testing"
 	"time"
 
-	. "github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
-	"github.com/aws/amazon-cloudwatch-agent/internal/structuredlogscommon"
 	"github.com/influxdata/telegraf/metric"
 	"github.com/stretchr/testify/assert"
+
+	. "github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
+	"github.com/aws/amazon-cloudwatch-agent/internal/structuredlogscommon"
 )
 
 func TestNodeFull(t *testing.T) {
-	tags := map[string]string{MetricType: TypeNode, NodeNameKey: "TestNodeName", ClusterNameKey: "TestClusterName", InstanceId: "i-123"}
+	tags := map[string]string{MetricType: TypeNode, NodeNameKey: "TestNodeName", ClusterNameKey: "TestClusterName", InstanceIdKey: "i-123"}
 	fields := map[string]interface{}{MetricName(TypeNode, CpuUtilization): 0, MetricName(TypeNode, MemUtilization): 0,
 		MetricName(TypeNode, NetTotalBytes): 0, MetricName(TypeNode, CpuReservedCapacity): 0, MetricName(TypeNode, MemReservedCapacity): 0,
 		MetricName(TypeNode, RunningPodCount): 0, MetricName(TypeNode, RunningContainerCount): 0, MetricName(TypeNode, CpuTotal): 0,
 		MetricName(TypeNode, CpuLimit): 0, MetricName(TypeNode, MemWorkingset): 0, MetricName(TypeNode, MemLimit): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	TagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 	expected := []structuredlogscommon.MetricRule{}
@@ -30,12 +31,12 @@ func TestNodeFull(t *testing.T) {
 }
 
 func TestNodeLackOfCpuUtilization(t *testing.T) {
-	tags := map[string]string{MetricType: TypeNode, NodeNameKey: "TestNodeName", ClusterNameKey: "TestClusterName", InstanceId: "i-123"}
+	tags := map[string]string{MetricType: TypeNode, NodeNameKey: "TestNodeName", ClusterNameKey: "TestClusterName", InstanceIdKey: "i-123"}
 	fields := map[string]interface{}{MetricName(TypeNode, MemUtilization): 0,
 		MetricName(TypeNode, NetTotalBytes): 0, MetricName(TypeNode, CpuReservedCapacity): 0, MetricName(TypeNode, MemReservedCapacity): 0,
 		MetricName(TypeNode, RunningPodCount): 0, MetricName(TypeNode, RunningContainerCount): 0, MetricName(TypeNode, CpuTotal): 0,
 		MetricName(TypeNode, CpuLimit): 0, MetricName(TypeNode, MemWorkingset): 0, MetricName(TypeNode, MemLimit): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	TagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 
@@ -47,12 +48,12 @@ func TestNodeLackOfCpuUtilization(t *testing.T) {
 }
 
 func TestNodeLackOfNodeNameKey(t *testing.T) {
-	tags := map[string]string{MetricType: TypeNode, ClusterNameKey: "TestClusterName", InstanceId: "i-123"}
+	tags := map[string]string{MetricType: TypeNode, ClusterNameKey: "TestClusterName", InstanceIdKey: "i-123"}
 	fields := map[string]interface{}{MetricName(TypeNode, CpuUtilization): 0, MetricName(TypeNode, MemUtilization): 0,
 		MetricName(TypeNode, NetTotalBytes): 0, MetricName(TypeNode, CpuReservedCapacity): 0, MetricName(TypeNode, MemReservedCapacity): 0,
 		MetricName(TypeNode, RunningPodCount): 0, MetricName(TypeNode, RunningContainerCount): 0, MetricName(TypeNode, CpuTotal): 0,
 		MetricName(TypeNode, CpuLimit): 0, MetricName(TypeNode, MemWorkingset): 0, MetricName(TypeNode, MemLimit): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	TagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 
@@ -67,7 +68,7 @@ func TestPodFull(t *testing.T) {
 	fields := map[string]interface{}{MetricName(TypePod, CpuUtilization): 0, MetricName(TypePod, MemUtilization): 0,
 		MetricName(TypePod, NetRxBytes): 0, MetricName(TypePod, NetTxBytes): 0, MetricName(TypePod, CpuUtilizationOverPodLimit): 0,
 		MetricName(TypePod, MemUtilizationOverPodLimit): 0, MetricName(TypePod, CpuReservedCapacity): 0, MetricName(TypePod, MemReservedCapacity): 0, MetricName(TypePod, ContainerRestartCount): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	TagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 	expected := []structuredlogscommon.MetricRule{}
@@ -80,7 +81,7 @@ func TestPodFullLackOfService(t *testing.T) {
 	fields := map[string]interface{}{MetricName(TypePod, CpuUtilization): 0, MetricName(TypePod, MemUtilization): 0,
 		MetricName(TypePod, NetRxBytes): 0, MetricName(TypePod, NetTxBytes): 0, MetricName(TypePod, CpuUtilizationOverPodLimit): 0,
 		MetricName(TypePod, MemUtilizationOverPodLimit): 0, MetricName(TypePod, CpuReservedCapacity): 0, MetricName(TypePod, MemReservedCapacity): 0, MetricName(TypePod, ContainerRestartCount): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	TagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 	expected := []structuredlogscommon.MetricRule{}
@@ -90,9 +91,9 @@ func TestPodFullLackOfService(t *testing.T) {
 }
 
 func TestNodeFSFull(t *testing.T) {
-	tags := map[string]string{MetricType: TypeNodeFS, NodeNameKey: "TestNodeName", ClusterNameKey: "TestClusterName", InstanceId: "i-123"}
+	tags := map[string]string{MetricType: TypeNodeFS, NodeNameKey: "TestNodeName", ClusterNameKey: "TestClusterName", InstanceIdKey: "i-123"}
 	fields := map[string]interface{}{MetricName(TypeNodeFS, FSUtilization): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	TagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 
@@ -104,7 +105,7 @@ func TestNodeFSFull(t *testing.T) {
 func TestClusterFull(t *testing.T) {
 	tags := map[string]string{MetricType: TypeCluster, ClusterNameKey: "TestClusterName"}
 	fields := map[string]interface{}{MetricName(TypeCluster, NodeCount): 0, MetricName(TypeCluster, FailedNodeCount): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	TagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 
@@ -116,7 +117,7 @@ func TestClusterFull(t *testing.T) {
 func TestClusterServiceFull(t *testing.T) {
 	tags := map[string]string{MetricType: TypeClusterService, ClusterNameKey: "TestClusterName", TypeService: "TestServiceName", K8sNamespace: "default"}
 	fields := map[string]interface{}{MetricName(TypeService, RunningPodCount): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	TagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 
@@ -128,7 +129,7 @@ func TestClusterServiceFull(t *testing.T) {
 func TestClusterNamespaceFull(t *testing.T) {
 	tags := map[string]string{MetricType: TypeClusterNamespace, ClusterNameKey: "TestClusterName", K8sNamespace: "TestNamespace"}
 	fields := map[string]interface{}{MetricName(K8sNamespace, RunningPodCount): 0}
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	TagMetricRule(m)
 	actual := m.Fields()[structuredlogscommon.MetricRuleKey].([]structuredlogscommon.MetricRule)
 

@@ -5,16 +5,16 @@ package logfile
 
 import (
 	"bytes"
-	"io/ioutil"
 	"log"
 	"os"
 	"strconv"
 	"sync"
 	"time"
 
+	"golang.org/x/text/encoding"
+
 	"github.com/aws/amazon-cloudwatch-agent/logs"
 	"github.com/aws/amazon-cloudwatch-agent/plugins/inputs/logfile/tail"
-	"golang.org/x/text/encoding"
 )
 
 const (
@@ -57,46 +57,58 @@ func (le LogEvent) Done() {
 }
 
 type tailerSrc struct {
-	group, stream  string
-	destination    string
-	stateFilePath  string
-	tailer         *tail.Tail
-	autoRemoval    bool
-	timestampFn    func(string) time.Time
-	enc            encoding.Encoding
-	maxEventSize   int
-	truncateSuffix string
+	group           string
+	stream          string
+	class           string
+	destination     string
+	stateFilePath   string
+	tailer          *tail.Tail
+	autoRemoval     bool
+	timestampFn     func(string) time.Time
+	enc             encoding.Encoding
+	maxEventSize    int
+	truncateSuffix  string
+	retentionInDays int
 
 	outputFn        func(logs.LogEvent)
 	isMLStart       func(string) bool
+	filters         []*LogFilter
 	offsetCh        chan fileOffset
 	done            chan struct{}
 	startTailerOnce sync.Once
 	cleanUpFns      []func()
 }
 
+// Verify tailerSrc implements LogSrc
+var _ logs.LogSrc = (*tailerSrc)(nil)
+
 func NewTailerSrc(
-	group, stream, destination, stateFilePath string,
+	group, stream, destination, stateFilePath, logClass string,
 	tailer *tail.Tail,
 	autoRemoval bool,
 	isMultilineStartFn func(string) bool,
+	filters []*LogFilter,
 	timestampFn func(string) time.Time,
 	enc encoding.Encoding,
 	maxEventSize int,
 	truncateSuffix string,
+	retentionInDays int,
 ) *tailerSrc {
 	ts := &tailerSrc{
-		group:          group,
-		stream:         stream,
-		destination:    destination,
-		stateFilePath:  stateFilePath,
-		tailer:         tailer,
-		autoRemoval:    autoRemoval,
-		isMLStart:      isMultilineStartFn,
-		timestampFn:    timestampFn,
-		enc:            enc,
-		maxEventSize:   maxEventSize,
-		truncateSuffix: truncateSuffix,
+		group:           group,
+		stream:          stream,
+		destination:     destination,
+		stateFilePath:   stateFilePath,
+		class:           logClass,
+		tailer:          tailer,
+		autoRemoval:     autoRemoval,
+		isMLStart:       isMultilineStartFn,
+		filters:         filters,
+		timestampFn:     timestampFn,
+		enc:             enc,
+		maxEventSize:    maxEventSize,
+		truncateSuffix:  truncateSuffix,
+		retentionInDays: retentionInDays,
 
 		offsetCh: make(chan fileOffset, 2000),
 		done:     make(chan struct{}),
@@ -113,23 +125,30 @@ func (ts *tailerSrc) SetOutput(fn func(logs.LogEvent)) {
 	ts.startTailerOnce.Do(func() { go ts.runTail() })
 }
 
-func (ts tailerSrc) Group() string {
+func (ts *tailerSrc) Group() string {
 	return ts.group
 }
 
-func (ts tailerSrc) Stream() string {
+func (ts *tailerSrc) Stream() string {
 	return ts.stream
 }
 
-func (ts tailerSrc) Description() string {
+func (ts *tailerSrc) Description() string {
 	return ts.tailer.Filename
 }
 
-func (ts tailerSrc) Destination() string {
+func (ts *tailerSrc) Destination() string {
 	return ts.destination
 }
 
-func (ts tailerSrc) Done(offset fileOffset) {
+func (ts *tailerSrc) Retention() int {
+	return ts.retentionInDays
+}
+
+func (ts *tailerSrc) Class() string {
+	return ts.class
+}
+func (ts *tailerSrc) Done(offset fileOffset) {
 	// ts.offsetCh will only be blocked when the runSaveState func has exited,
 	// which only happens when the original file has been removed, thus making
 	// Keeping its offset useless
@@ -170,7 +189,10 @@ func (ts *tailerSrc) runTail() {
 						offset: *fo,
 						src:    ts,
 					}
-					ts.outputFn(e)
+
+					if ShouldPublish(ts.group, ts.stream, ts.filters, e) {
+						ts.outputFn(e)
+					}
 				}
 				return
 			}
@@ -221,7 +243,11 @@ func (ts *tailerSrc) runTail() {
 					offset: *fo,
 					src:    ts,
 				}
-				ts.outputFn(e)
+				// Note: This only checks against the truncated log message, so it is not necessary to load
+				//       the entire log message for filtering.
+				if ShouldPublish(ts.group, ts.stream, ts.filters, e) {
+					ts.outputFn(e)
+				}
 			}
 
 			msgBuf.Reset()
@@ -244,7 +270,9 @@ func (ts *tailerSrc) runTail() {
 				offset: *fo,
 				src:    ts,
 			}
-			ts.outputFn(e)
+			if ShouldPublish(ts.group, ts.stream, ts.filters, e) {
+				ts.outputFn(e)
+			}
 			msgBuf.Reset()
 			cnt = 0
 		case <-ts.done:
@@ -257,11 +285,14 @@ func (ts *tailerSrc) cleanUp() {
 	if ts.autoRemoval {
 		if err := os.Remove(ts.tailer.Filename); err != nil {
 			log.Printf("W! [logfile] Failed to auto remove file %v: %v", ts.tailer.Filename, err)
+		} else {
+			log.Printf("I! [logfile] Successfully removed file %v with auto_removal feature", ts.tailer.Filename)
 		}
 	}
 	for _, clf := range ts.cleanUpFns {
 		clf()
 	}
+
 	if ts.outputFn != nil {
 		ts.outputFn(nil) // inform logs agent the tailer src's exit, to stop runSrcToDest
 	}
@@ -288,6 +319,13 @@ func (ts *tailerSrc) runSaveState() {
 				continue
 			}
 			lastSavedOffset = offset
+		case <-ts.tailer.FileDeletedCh:
+			log.Printf("W! [logfile] deleting state file %s", ts.stateFilePath)
+			err := os.Remove(ts.stateFilePath)
+			if err != nil {
+				log.Printf("W! [logfile] Error happened while deleting state file %s on cleanup: %v", ts.stateFilePath, err)
+			}
+			return
 		case <-ts.done:
 			err := ts.saveState(offset.offset)
 			if err != nil {
@@ -304,5 +342,5 @@ func (ts *tailerSrc) saveState(offset int64) error {
 	}
 
 	content := []byte(strconv.FormatInt(offset, 10) + "\n" + ts.tailer.Filename)
-	return ioutil.WriteFile(ts.stateFilePath, content, stateFileMode)
+	return os.WriteFile(ts.stateFilePath, content, stateFileMode)
 }

@@ -9,7 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	_ "net/http/pprof" // Comment this line to disable pprof endpoint.
@@ -22,24 +22,31 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/amazon-cloudwatch-agent/cfg/agentinfo"
-	"github.com/aws/amazon-cloudwatch-agent/cfg/migrate"
-	"github.com/aws/amazon-cloudwatch-agent/logs"
-	"github.com/aws/amazon-cloudwatch-agent/profiler"
-
-	lumberjack "github.com/aws/amazon-cloudwatch-agent/logger"
 	"github.com/influxdata/telegraf/agent"
 	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/logger"
-
-	//_ "github.com/influxdata/telegraf/plugins/aggregators/all"
 	"github.com/influxdata/telegraf/plugins/inputs"
-	//_ "github.com/influxdata/telegraf/plugins/inputs/all"
 	"github.com/influxdata/telegraf/plugins/outputs"
-	//_ "github.com/influxdata/telegraf/plugins/outputs/all"
-	//_ "github.com/influxdata/telegraf/plugins/processors/all"
-	_ "github.com/aws/amazon-cloudwatch-agent/plugins"
+	"github.com/influxdata/wlog"
 	"github.com/kardianos/service"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/featuregate"
+	"go.opentelemetry.io/collector/otelcol"
+
+	configaws "github.com/aws/amazon-cloudwatch-agent/cfg/aws"
+	"github.com/aws/amazon-cloudwatch-agent/cfg/envconfig"
+	"github.com/aws/amazon-cloudwatch-agent/cmd/amazon-cloudwatch-agent/internal"
+	"github.com/aws/amazon-cloudwatch-agent/extension/agenthealth/handler/useragent"
+	"github.com/aws/amazon-cloudwatch-agent/internal/version"
+	cwaLogger "github.com/aws/amazon-cloudwatch-agent/logger"
+	"github.com/aws/amazon-cloudwatch-agent/logs"
+	_ "github.com/aws/amazon-cloudwatch-agent/plugins"
+	"github.com/aws/amazon-cloudwatch-agent/profiler"
+	"github.com/aws/amazon-cloudwatch-agent/receiver/adapter"
+	"github.com/aws/amazon-cloudwatch-agent/service/configprovider"
+	"github.com/aws/amazon-cloudwatch-agent/service/defaultcomponents"
+	"github.com/aws/amazon-cloudwatch-agent/service/registry"
+	"github.com/aws/amazon-cloudwatch-agent/tool/paths"
 )
 
 const (
@@ -49,13 +56,14 @@ const (
 var fDebug = flag.Bool("debug", false,
 	"turn on debug logging")
 var pprofAddr = flag.String("pprof-addr", "",
-	"pprof address to listen on, not activate pprof if empty")
+	"pprof address to listen on, disabled by default, examples: 'localhost:1234', ':4567' (restricted to localhost)")
 var fQuiet = flag.Bool("quiet", false,
 	"run in quiet mode")
 var fTest = flag.Bool("test", false, "enable test mode: gather metrics, print them out, and exit")
 var fTestWait = flag.Int("test-wait", 0, "wait up to this many seconds for service inputs to complete in test mode")
 var fSchemaTest = flag.Bool("schematest", false, "validate the toml file schema")
-var fConfig = flag.String("config", "", "configuration file to load")
+var fTomlConfig = flag.String("config", "", "configuration file to load")
+var fOtelConfig = flag.String("otelconfig", paths.YamlConfigPath, "YAML configuration file to run OTel pipeline")
 var fEnvConfig = flag.String("envconfig", "", "env configuration file to load")
 var fConfigDirectory = flag.String("config-directory", "",
 	"directory containing additional *.conf files")
@@ -77,19 +85,13 @@ var fAggregatorFilters = flag.String("aggregator-filter", "",
 	"filter the aggregators to enable, separator is :")
 var fProcessorFilters = flag.String("processor-filter", "",
 	"filter the processors to enable, separator is :")
-var fUsage = flag.String("usage", "",
-	"print usage for a plugin, ie, 'telegraf --usage mysql'")
 var fService = flag.String("service", "",
 	"operate on the service (windows only)")
 var fServiceName = flag.String("service-name", "telegraf", "service name (windows only)")
 var fServiceDisplayName = flag.String("service-display-name", "Telegraf Data Collector Service", "service display name (windows only)")
 var fRunAsConsole = flag.Bool("console", false, "run as console application (windows only)")
-
-var (
-	version string
-	commit  string
-	branch  string
-)
+var fSetEnv = flag.String("setenv", "", "set an env in the configuration file in the format of KEY=VALUE")
+var fStartUpErrorFile = flag.String("startup-error-file", "", "file to touch if agent can't start")
 
 var stop chan struct{}
 
@@ -114,7 +116,7 @@ func reloadLoop(
 			select {
 			case sig := <-signals:
 				if sig == syscall.SIGHUP {
-					log.Printf("I! Reloading Telegraf config")
+					log.Println("I! Reloading Telegraf config")
 					<-reload
 					reload <- true
 				}
@@ -139,108 +141,116 @@ func reloadLoop(
 			}
 		}(ctx)
 
+		if envConfigPath, err := getEnvConfigPath(*fTomlConfig, *fEnvConfig); err == nil {
+			// Reloads environment variables when file is changed
+			go func(ctx context.Context, envConfigPath string) {
+				var previousModTime time.Time
+				ticker := time.NewTicker(30 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						if info, err := os.Stat(envConfigPath); err == nil && info.ModTime().After(previousModTime) {
+							if err := loadEnvironmentVariables(envConfigPath); err != nil {
+								log.Printf("E! Unable to load env variables: %v\n", err)
+							}
+							// Sets the log level based on environment variable
+							logLevel := os.Getenv(envconfig.CWAGENT_LOG_LEVEL)
+							if logLevel == "" {
+								logLevel = "INFO"
+							}
+							if err := wlog.SetLevelFromName(logLevel); err != nil {
+								log.Printf("E! Unable to set log level: %v\n", err)
+							}
+							cwaLogger.SetLevel(cwaLogger.ConvertToAtomicLevel(wlog.LogLevel()))
+							// Set AWS SDK logging
+							sdkLogLevel := os.Getenv(envconfig.AWS_SDK_LOG_LEVEL)
+							configaws.SetSDKLogLevel(sdkLogLevel)
+							previousModTime = info.ModTime()
+						}
+					case <-ctx.Done():
+						return
+					}
+				}
+			}(ctx, envConfigPath)
+		}
+
 		err := runAgent(ctx, inputFilters, outputFilters)
 		if err != nil && err != context.Canceled {
+			if *fStartUpErrorFile != "" {
+				f, err := os.OpenFile(*fStartUpErrorFile, os.O_CREATE|os.O_WRONLY, 0644)
+				if err != nil {
+					log.Printf("E! Unable to create errorFile: %s", err)
+				} else {
+					_ = f.Close()
+				}
+			}
 			log.Fatalf("E! [telegraf] Error running agent: %v", err)
 		}
 	}
 }
 
+// loadEnvironmentVariables updates OS ENV vars with key/val from the given JSON file.
+// The "config-translator" program populates that file.
 func loadEnvironmentVariables(path string) error {
 	if path == "" {
-		return fmt.Errorf("No env config file specified")
+		return fmt.Errorf("no env config file specified")
 	}
 
-	bytes, err := ioutil.ReadFile(path)
+	bytes, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("Can't read env config file %s due to: %s", path, err.Error())
+		return fmt.Errorf("cannot read env config file %s due to: %s", path, err.Error())
 	}
 	envVars := map[string]string{}
 	err = json.Unmarshal(bytes, &envVars)
 	if err != nil {
-		return fmt.Errorf("Can't create env config due to: %s", err.Error())
+		return fmt.Errorf("cannot create env config due to: %s", err.Error())
 	}
 
 	for key, val := range envVars {
 		os.Setenv(key, val)
-		log.Printf("I! %s is set to \"%s\"", key, val)
+		log.Printf("I! %s is set to \"%s\"\n", key, val)
 	}
 	return nil
+}
+
+func getEnvConfigPath(configPath, envConfigPath string) (string, error) {
+	if configPath == "" {
+		return "", fmt.Errorf("no config file specified")
+	}
+	//load the environment variables that's saved in json env config file
+	if envConfigPath == "" {
+		dir, _ := filepath.Split(configPath)
+		envConfigPath = filepath.Join(dir, defaultEnvCfgFileName)
+	}
+	return envConfigPath, nil
 }
 
 func runAgent(ctx context.Context,
 	inputFilters []string,
 	outputFilters []string,
 ) error {
-	if *fConfig == "" {
-		return fmt.Errorf("No config file specified")
+	envConfigPath, err := getEnvConfigPath(*fTomlConfig, *fEnvConfig)
+	if err != nil {
+		return err
 	}
-	//load the environment variables that's saved in json env config file
-	if *fEnvConfig == "" {
-		dir, _ := filepath.Split(*fConfig)
-		*fEnvConfig = filepath.Join(dir, defaultEnvCfgFileName)
-	}
-	err := loadEnvironmentVariables(*fEnvConfig)
+	err = loadEnvironmentVariables(envConfigPath)
 	if err != nil && !*fSchemaTest {
-		log.Printf("W! Failed to load environment variables due to %s", err.Error())
+		log.Printf("W! Failed to load environment variables due to %s\n", err.Error())
 	}
 	// If no other options are specified, load the config file and run.
 	c := config.NewConfig()
 	c.OutputFilters = outputFilters
 	c.InputFilters = inputFilters
 
-	isOld, err := migrate.IsOldConfig(*fConfig)
+	err = loadTomlConfigIntoAgent(c)
 	if err != nil {
-		log.Printf("W! Failed to detect if config file is old format: %v", err)
+		return err
 	}
 
-	if isOld {
-		migratedConfFile, err := migrate.MigrateFile(*fConfig)
-		if err != nil {
-			log.Printf("W! Failed to migrate old config format file %v: %v", *fConfig, err)
-		}
-
-		err = c.LoadConfig(migratedConfFile)
-		if err != nil {
-			return err
-		}
-
-		agentinfo.BuildStr += "_M"
-	} else {
-		err = c.LoadConfig(*fConfig)
-		if err != nil {
-			return err
-		}
-	}
-
-	if *fConfigDirectory != "" {
-		err = c.LoadDirectory(*fConfigDirectory)
-		if err != nil {
-			return err
-		}
-	}
-	if !*fTest && len(c.Outputs) == 0 {
-		return errors.New("Error: no outputs found, did you provide a valid config file?")
-	}
-	if len(c.Inputs) == 0 {
-		return errors.New("Error: no inputs found, did you provide a valid config file?")
-	}
-
-	if int64(c.Agent.Interval.Duration) <= 0 {
-		return fmt.Errorf("Agent interval must be positive, found %s",
-			c.Agent.Interval.Duration)
-	}
-
-	if int64(c.Agent.FlushInterval.Duration) <= 0 {
-		return fmt.Errorf("Agent flush_interval must be positive; found %s",
-			c.Agent.Interval.Duration)
-	}
-
-	if *fSchemaTest {
-		//up to this point, the given config file must be valid
-		fmt.Println(agentinfo.FullVersion())
-		fmt.Printf("The given config: %v is valid\n", *fConfig)
-		os.Exit(0)
+	err = validateAgentFinalConfigAndPlugins(c)
+	if err != nil {
+		return err
 	}
 
 	ag, err := agent.NewAgent(c)
@@ -257,24 +267,28 @@ func runAgent(ctx context.Context,
 		RotationInterval:    ag.Config.Agent.LogfileRotationInterval,
 		RotationMaxSize:     ag.Config.Agent.LogfileRotationMaxSize,
 		RotationMaxArchives: ag.Config.Agent.LogfileRotationMaxArchives,
+		LogWithTimezone:     "",
 	}
 
-	logger.SetupLogging(logConfig)
-	log.Printf("I! Starting AmazonCloudWatchAgent %s", agentinfo.Version())
+	writer := logger.NewLogWriter(logConfig)
+
+	log.Printf("I! Starting AmazonCloudWatchAgent %s with log file %s with log target %s\n", version.Full(), ag.Config.Agent.Logfile, ag.Config.Agent.LogTarget)
+	// Need to set SDK log level before plugins get loaded.
+	// Some aws.Config objects get created early and live forever which means
+	// we cannot change the sdk log level without restarting the Agent.
+	// For example CloudWatch.Connect().
+	sdkLogLevel := os.Getenv(envconfig.AWS_SDK_LOG_LEVEL)
+	configaws.SetSDKLogLevel(sdkLogLevel)
+	if sdkLogLevel == "" {
+		log.Println("I! AWS SDK log level not set")
+	} else {
+		log.Printf("I! AWS SDK log level, %s\n", sdkLogLevel)
+	}
 
 	if *fTest || *fTestWait != 0 {
 		testWaitDuration := time.Duration(*fTestWait) * time.Second
 		return ag.Test(ctx, testWaitDuration)
 	}
-
-	log.Printf("I! Loaded inputs: %s", strings.Join(c.InputNames(), " "))
-	log.Printf("I! Loaded aggregators: %s", strings.Join(c.AggregatorNames(), " "))
-	log.Printf("I! Loaded processors: %s", strings.Join(c.ProcessorNames(), " "))
-	log.Printf("I! Loaded outputs: %s", strings.Join(c.OutputNames(), " "))
-	log.Printf("I! Tags enabled: %s", c.ListTags())
-
-	agentinfo.InputPlugins = c.InputNames()
-	agentinfo.OutputPlugins = c.OutputNames()
 
 	if *fPidfile != "" {
 		f, err := os.OpenFile(*fPidfile, os.O_CREATE|os.O_WRONLY, 0644)
@@ -288,19 +302,100 @@ func runAgent(ctx context.Context,
 			defer func() {
 				err := os.Remove(*fPidfile)
 				if err != nil {
-					log.Printf("E! Unable to remove pidfile: %s", err)
+					log.Printf("E! Unable to remove pidfile: %s\n", err)
 				}
 			}()
 		}
 	}
-	logAgent := logs.NewLogAgent(c)
-	go logAgent.Run(ctx)
-	return ag.Run(ctx)
+
+	if len(c.Inputs) != 0 && len(c.Outputs) != 0 {
+		log.Println("creating new logs agent")
+		logAgent := logs.NewLogAgent(c)
+		// Always run logAgent as goroutine regardless of whether starting OTEL or Telegraf.
+		go logAgent.Run(ctx)
+
+		// If OTEL config does not exist, then ASSUME just monitoring logs.
+		// So just start Telegraf.
+		_, err = os.Stat(*fOtelConfig)
+		if errors.Is(err, os.ErrNotExist) {
+			useragent.Get().SetComponents(&otelcol.Config{}, c)
+			return ag.Run(ctx)
+		}
+	}
+	// Else start OTEL and rely on adapter package to start the logfile plugin.
+
+	yamlConfigPath := *fOtelConfig
+	provider, err := configprovider.Get(yamlConfigPath)
+	if err != nil {
+		log.Printf("E! Error while initializing config provider: %v\n", err)
+		return err
+	}
+
+	factories, err := components(c)
+	if err != nil {
+		log.Printf("E! Error while adapting telegraf input plugins: %v\n", err)
+		return err
+	}
+
+	cfg, err := provider.Get(ctx, factories)
+	if err != nil {
+		return err
+	}
+
+	useragent.Get().SetComponents(cfg, c)
+
+	params := getCollectorParams(factories, provider, writer)
+
+	_ = featuregate.GlobalRegistry().Set("exporter.xray.allowDot", true)
+	cmd := otelcol.NewCommand(params)
+
+	// Noticed that args of parent process get passed here to otel collector which causes failures complaining about
+	// unrecognized args. So below change overwrites the args. Need to investigate this further as I dont think the config
+	// path below here is actually used and it still respects what was set in the settings above.
+	e := []string{"--config=" + yamlConfigPath + " --feature-gates=exporter.xray.allowDot"}
+	cmd.SetArgs(e)
+
+	return cmd.Execute()
 }
 
-func usageExit(rc int) {
-	//fmt.Println(internal.Usage)
-	os.Exit(rc)
+func getCollectorParams(factories otelcol.Factories, provider otelcol.ConfigProvider, writer io.Writer) otelcol.CollectorSettings {
+	level := cwaLogger.ConvertToAtomicLevel(wlog.LogLevel())
+	loggingOptions := cwaLogger.NewLoggerOptions(writer, level)
+	return otelcol.CollectorSettings{
+		Factories: func() (otelcol.Factories, error) {
+			return factories, nil
+		},
+		ConfigProvider: provider,
+		// build info is essential for populating the user agent string in otel contrib upstream exporters, like the EMF exporter
+		BuildInfo: component.BuildInfo{
+			Command:     "CWAgent",
+			Description: "CloudWatch Agent",
+			Version:     version.Number(),
+		},
+		LoggingOptions: loggingOptions,
+	}
+}
+
+func components(telegrafConfig *config.Config) (otelcol.Factories, error) {
+	telegrafAdapter := adapter.NewAdapter(telegrafConfig)
+
+	factories, err := defaultcomponents.Factories()
+	if err != nil {
+		return factories, err
+	}
+
+	// Adapted receivers from telegraf
+	for _, input := range telegrafConfig.Inputs {
+		registry.Register(registry.WithReceiver(telegrafAdapter.NewReceiverFactory(input.Config.Name)))
+	}
+
+	for _, apply := range registry.Options() {
+		apply(&factories)
+	}
+
+	registry.Reset()
+
+	return factories, nil
 }
 
 type program struct {
@@ -310,7 +405,7 @@ type program struct {
 	processorFilters  []string
 }
 
-func (p *program) Start(s service.Service) error {
+func (p *program) Start(_ service.Service) error {
 	go p.run()
 	return nil
 }
@@ -324,13 +419,12 @@ func (p *program) run() {
 		p.processorFilters,
 	)
 }
-func (p *program) Stop(s service.Service) error {
+func (p *program) Stop(_ service.Service) error {
 	close(stop)
 	return nil
 }
 
 func main() {
-	flag.Usage = func() { usageExit(0) }
 	flag.Parse()
 	args := flag.Args()
 
@@ -361,10 +455,13 @@ func main() {
 			parts := strings.Split(pprofHostPort, ":")
 			if len(parts) == 2 && parts[0] == "" {
 				pprofHostPort = fmt.Sprintf("localhost:%s", parts[1])
+			} else if parts[0] != "localhost" {
+				log.Printf("W! Not starting pprof, it is restricted to localhost:nnnn")
+				return
 			}
 			pprofHostPort = "http://" + pprofHostPort + "/debug/pprof"
 
-			log.Printf("I! Starting pprof HTTP server at: %s", pprofHostPort)
+			log.Printf("I! Starting pprof HTTP server at: %s\n", pprofHostPort)
 
 			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
 				log.Fatal("E! " + err.Error())
@@ -375,7 +472,7 @@ func main() {
 	if len(args) > 0 {
 		switch args[0] {
 		case "version":
-			fmt.Println(agentinfo.FullVersion())
+			fmt.Println(version.Full())
 			return
 		case "config":
 			config.PrintSampleConfig(
@@ -414,7 +511,7 @@ func main() {
 		}
 		return
 	case *fVersion:
-		fmt.Println(agentinfo.FullVersion())
+		fmt.Println(version.Full())
 		return
 	case *fSampleConfig:
 		config.PrintSampleConfig(
@@ -425,11 +522,28 @@ func main() {
 			processorFilters,
 		)
 		return
-	case *fUsage != "":
-		err := config.PrintInputConfig(*fUsage)
-		err2 := config.PrintOutputConfig(*fUsage)
-		if err != nil && err2 != nil {
-			log.Fatalf("E! %s and %s", err, err2)
+	case *fSetEnv != "":
+		if *fEnvConfig != "" {
+			parts := strings.SplitN(*fSetEnv, "=", 2)
+			if len(parts) == 2 {
+				bytes, err := os.ReadFile(*fEnvConfig)
+				if err != nil {
+					log.Fatalf("E! Failed to read env config: %v", err)
+				}
+				envVars := map[string]string{}
+				err = json.Unmarshal(bytes, &envVars)
+				if err != nil {
+					log.Fatalf("E! Failed to unmarshal env config: %v", err)
+				}
+				envVars[parts[0]] = parts[1]
+				bytes, err = json.MarshalIndent(envVars, "", "\t")
+				if err != nil {
+					log.Fatalf("E! Failed to marshal env config: %v", err)
+				}
+				if err = os.WriteFile(*fEnvConfig, bytes, 0644); err != nil {
+					log.Fatalf("E! Failed to update env config: %v", err)
+				}
+			}
 		}
 		return
 	}
@@ -460,8 +574,8 @@ func main() {
 		// Handle the --service flag here to prevent any issues with tooling that
 		// may not have an interactive session, e.g. installing from Ansible.
 		if *fService != "" {
-			if *fConfig != "" {
-				svcConfig.Arguments = []string{"--config", *fConfig}
+			if *fTomlConfig != "" {
+				svcConfig.Arguments = []string{"--config", *fTomlConfig}
 			}
 			if *fConfigDirectory != "" {
 				svcConfig.Arguments = append(svcConfig.Arguments, "--config-directory", *fConfigDirectory)
@@ -475,11 +589,10 @@ func main() {
 			}
 			os.Exit(0)
 		} else {
-			winlogger, err := s.Logger(nil)
-			if err == nil {
-				//When in service mode, register eventlog target andd setup default logging to eventlog
-				logger.RegisterEventLogger(winlogger)
-				logger.SetupLogging(logger.LogConfig{LogTarget: lumberjack.LogTargetLumberjack})
+			// When in service mode, register eventlog target and setup default logging to eventlog
+			e := RegisterEventLogger()
+			if e != nil {
+				log.Println("E! Cannot register event log " + e.Error())
 			}
 			err = s.Run()
 
@@ -510,4 +623,55 @@ func windowsRunAsService() bool {
 	}
 
 	return !service.Interactive()
+}
+
+func loadTomlConfigIntoAgent(c *config.Config) error {
+	err := c.LoadConfig(*fTomlConfig)
+	if err != nil {
+		return err
+	}
+
+	if *fConfigDirectory != "" {
+		err = c.LoadDirectory(*fConfigDirectory)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateAgentFinalConfigAndPlugins(c *config.Config) error {
+	if int64(c.Agent.Interval) <= 0 {
+		return fmt.Errorf("agent interval must be positive, found %v", c.Agent.Interval)
+	}
+
+	if int64(c.Agent.FlushInterval) <= 0 {
+		return fmt.Errorf("agent flush_interval must be positive; found %v", c.Agent.FlushInterval)
+	}
+
+	if inputPlugin, err := checkRightForBinariesFileWithInputPlugins(c.InputNames()); err != nil {
+		return fmt.Errorf("validate input plugin %s failed because of %v", inputPlugin, err)
+	}
+
+	if *fSchemaTest {
+		//up to this point, the given config file must be valid
+		fmt.Println(version.Full())
+		fmt.Printf("The given config: %v is valid\n", *fTomlConfig)
+		os.Exit(0)
+	}
+
+	return nil
+}
+
+func checkRightForBinariesFileWithInputPlugins(inputPlugins []string) (string, error) {
+	for _, inputPlugin := range inputPlugins {
+		if inputPlugin == "nvidia_smi" {
+			if err := internal.CheckNvidiaSMIBinaryRights(); err != nil {
+				return "nvidia_smi", err
+			}
+		}
+	}
+
+	return "", nil
 }

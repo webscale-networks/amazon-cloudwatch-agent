@@ -10,6 +10,7 @@ import (
 	"github.com/aws/amazon-cloudwatch-agent/translator/jsonconfig/mergeJsonRule"
 	"github.com/aws/amazon-cloudwatch-agent/translator/jsonconfig/mergeJsonUtil"
 	parent "github.com/aws/amazon-cloudwatch-agent/translator/translate/logs/logs_collected/windows_events"
+	logUtil "github.com/aws/amazon-cloudwatch-agent/translator/translate/logs/util"
 	"github.com/aws/amazon-cloudwatch-agent/translator/util"
 )
 
@@ -20,7 +21,7 @@ const (
 	EventConfigTomlKey = "event_config"
 	BatchReadSizeKey   = "batch_read_size"
 	EventLevelsKey     = "event_levels"
-	//TODO: Performance test to confirm the proper value here - https://sim.amazon.com/issues/CWAgent-2248
+	//TODO: Performance test to confirm the proper value here - https://github.com/aws/amazon-cloudwatch-agent/issues/231
 	BatchReadSizeValue = 170
 )
 
@@ -57,6 +58,7 @@ func (c *CollectList) ApplyRule(input interface{}) (returnKey string, returnVal 
 			result = append(result, singleTransformedConfig)
 		}
 	}
+	logUtil.ValidateLogGroupFields(result, GetCurPath())
 	return EventConfigTomlKey, result
 }
 

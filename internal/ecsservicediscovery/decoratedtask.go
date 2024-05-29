@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/arn"
 	"github.com/aws/aws-sdk-go/service/ecs"
 )
 
@@ -22,6 +24,8 @@ const (
 	taskLaunchTypeLabel  = "LaunchType"
 	taskJobNameLabel     = "job"
 	taskMetricsPathLabel = "__metrics_path__"
+	taskClusterNameLabel = "TaskClusterName"
+	taskIdLabel          = "TaskId"
 	ec2InstanceTypeLabel = "InstanceType"
 	ec2VpcIdLabel        = "VpcId"
 	ec2SubnetIdLabel     = "SubnetId"
@@ -68,12 +72,13 @@ func addExporterLabels(labels map[string]string, labelKey string, labelValue *st
 // Get the private ip of the decorated task.
 // Return "" when fail to get the private ip
 func (t *DecoratedTask) getPrivateIp() string {
-	if t.TaskDefinition.NetworkMode == nil {
+	networkMode := aws.StringValue(t.TaskDefinition.NetworkMode)
+	if networkMode == ecs.NetworkModeNone {
 		return ""
 	}
 
 	// AWSVPC: Get Private IP from tasks->attachments (ElasticNetworkInterface -> privateIPv4Address)
-	if *t.TaskDefinition.NetworkMode == ecs.NetworkModeAwsvpc {
+	if networkMode == ecs.NetworkModeAwsvpc {
 		for _, v := range t.Task.Attachments {
 			if aws.StringValue(v.Type) == "ElasticNetworkInterface" {
 				for _, d := range v.Details {
@@ -92,9 +97,9 @@ func (t *DecoratedTask) getPrivateIp() string {
 }
 
 func (t *DecoratedTask) getPrometheusExporterPort(configuredPort int64, c *ecs.ContainerDefinition) int64 {
-	var mappedPort int64 = 0
+	var mappedPort int64
 	networkMode := aws.StringValue(t.TaskDefinition.NetworkMode)
-	if networkMode == "" || networkMode == ecs.NetworkModeNone {
+	if networkMode == ecs.NetworkModeNone {
 		// for network type: none, skipped directly
 		return 0
 	}
@@ -106,7 +111,7 @@ func (t *DecoratedTask) getPrometheusExporterPort(configuredPort int64, c *ecs.C
 				mappedPort = aws.Int64Value(v.HostPort)
 			}
 		}
-	} else if networkMode == ecs.NetworkModeBridge {
+	} else if networkMode == ecs.NetworkModeBridge || networkMode == "" {
 		// for network type: bridge, get the mapped port from: task->containers->networkBindings
 		containerName := aws.StringValue(c.Name)
 		for _, tc := range t.Task.Containers {
@@ -138,6 +143,23 @@ func (t *DecoratedTask) generatePrometheusTarget(
 	addExporterLabels(labels, taskGroupLabel, t.Task.Group)
 	addExporterLabels(labels, taskStartedbyLabel, t.Task.StartedBy)
 	addExporterLabels(labels, taskLaunchTypeLabel, t.Task.LaunchType)
+
+	if arn, err := arn.Parse(*t.Task.TaskArn); err == nil {
+		// ARN formats: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-account-settings.html#ecs-resource-ids
+		splitResource := strings.Split(arn.Resource, "/")[1:]
+		if len(splitResource) == 1 {
+			// Old ARN format
+			taskId := splitResource[0]
+			addExporterLabels(labels, taskIdLabel, &taskId)
+		} else if len(splitResource) == 2 {
+			// New ARN format
+			clusterName := splitResource[0]
+			taskId := splitResource[1]
+			addExporterLabels(labels, taskClusterNameLabel, &clusterName)
+			addExporterLabels(labels, taskIdLabel, &taskId)
+		}
+	}
+
 	if t.EC2Info != nil {
 		addExporterLabels(labels, ec2InstanceTypeLabel, &t.EC2Info.InstanceType)
 		addExporterLabels(labels, ec2VpcIdLabel, &t.EC2Info.VpcId)
@@ -150,7 +172,7 @@ func (t *DecoratedTask) generatePrometheusTarget(
 			addExporterLabels(labels, k, v)
 		}
 	}
-	// handle customized job label at last, so the conflict job docker label is overriden
+	// handle customized job label at last, so the conflict job docker label is overridden
 	addExporterLabels(labels, taskJobNameLabel, &customizedJobName)
 
 	return &PrometheusTarget{

@@ -4,13 +4,13 @@
 package k8sclient
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"sync"
 	"time"
 
-	"github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -18,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
 )
 
 type ReplicaSetClient interface {
@@ -99,10 +101,6 @@ func (c *replicaSetClient) Init() {
 		return
 	}
 
-	if _, err := Get().ClientSet.AppsV1().ReplicaSets(metav1.NamespaceAll).List(metav1.ListOptions{}); err != nil {
-		panic(fmt.Sprintf("Cannot list ReplicaSet. err: %v", err))
-	}
-
 	c.stopChan = make(chan struct{})
 
 	c.store = NewObjStore(transformFuncReplicaSet)
@@ -147,12 +145,16 @@ func transformFuncReplicaSet(obj interface{}) (interface{}, error) {
 }
 
 func createReplicaSetListWatch(client kubernetes.Interface, ns string) cache.ListerWatcher {
+	ctx := context.Background()
 	return &cache.ListWatch{
 		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
-			return client.AppsV1().ReplicaSets(ns).List(opts)
+			opts.ResourceVersion = ""
+			// Passing empty context as this was not required by old List()
+			return client.AppsV1().ReplicaSets(ns).List(ctx, opts)
 		},
 		WatchFunc: func(opts metav1.ListOptions) (watch.Interface, error) {
-			return client.AppsV1().ReplicaSets(ns).Watch(opts)
+			// Passing empty context as this was not required by old Watch()
+			return client.AppsV1().ReplicaSets(ns).Watch(ctx, opts)
 		},
 	}
 }

@@ -1,0 +1,7 @@
+detectors: [eks, env, ec2]
+override: true
+timeout: 2s
+ec2:
+  tags:
+    - ^kubernetes.io/cluster/.*$
+    - ^aws:autoscaling:groupName

@@ -6,23 +6,25 @@ package k8sdecorator
 import (
 	"time"
 
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/plugins/processors"
+
 	. "github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
 	"github.com/aws/amazon-cloudwatch-agent/internal/logscommon"
 	"github.com/aws/amazon-cloudwatch-agent/plugins/processors/k8sdecorator/stores"
 	"github.com/aws/amazon-cloudwatch-agent/plugins/processors/k8sdecorator/structuredlogsadapter"
-	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/plugins/processors"
 )
 
 type K8sDecorator struct {
-	started         bool
-	stores          []stores.K8sStore
-	shutdownC       chan bool
-	TagService      bool   `toml:"tag_service"`
-	ClusterName     string `toml:"cluster_name"`
-	HostIP          string `toml:"host_ip"`
-	NodeName        string `toml:"node_name"`
-	PrefFullPodName bool   `toml:"prefer_full_pod_name"`
+	started                 bool
+	stores                  []stores.K8sStore
+	shutdownC               chan bool
+	DisableMetricExtraction bool   `toml:"disable_metric_extraction"`
+	TagService              bool   `toml:"tag_service"`
+	ClusterName             string `toml:"cluster_name"`
+	HostIP                  string `toml:"host_ip"`
+	NodeName                string `toml:"node_name"`
+	PrefFullPodName         bool   `toml:"prefer_full_pod_name"`
 }
 
 func (k *K8sDecorator) Description() string {
@@ -53,7 +55,9 @@ OUTER:
 		}
 		structuredlogsadapter.AddKubernetesInfo(metric, kubernetesBlob)
 		structuredlogsadapter.TagMetricSource(metric)
-		structuredlogsadapter.TagMetricRule(metric)
+		if !k.DisableMetricExtraction {
+			structuredlogsadapter.TagMetricRule(metric)
+		}
 		structuredlogsadapter.TagLogGroup(metric)
 		metric.AddTag(logscommon.LogStreamNameTag, k.NodeName)
 		out = append(out, metric)

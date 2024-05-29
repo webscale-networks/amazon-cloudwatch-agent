@@ -6,16 +6,20 @@ package aws
 import (
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/credentials/ec2rolecreds"
 	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/endpoints"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sts"
+
+	"github.com/aws/amazon-cloudwatch-agent/extension/agenthealth/handler/stats/agent"
 )
 
 const (
@@ -60,9 +64,8 @@ var credentialsChain = make([]RootCredentialsProvider, 0)
 
 func getRootCredentialsFromChain(c *CredentialConfig) *credentials.Credentials {
 	for _, provider := range credentialsChain {
-		credentials := provider.Credentials(c)
-		if credentials != nil {
-			return credentials
+		if creds := provider.Credentials(c); creds != nil {
+			return creds
 		}
 	}
 	return nil
@@ -77,17 +80,45 @@ func OverwriteCredentialsChain(providers ...RootCredentialsProvider) {
 }
 
 func getSession(config *aws.Config) *session.Session {
-	ses, err := session.NewSession(config)
+	cfgFiles := getFallbackSharedConfigFiles(backwardsCompatibleUserHomeDir)
+	log.Printf("D! Fallback shared config file(s): %v", cfgFiles)
+	ses, err := session.NewSessionWithOptions(session.Options{
+		Config:            *config,
+		SharedConfigFiles: cfgFiles,
+	})
 	if err != nil {
 		log.Printf("E! Failed to create credential sessions, retrying in 15s, error was '%s' \n", err)
 		time.Sleep(15 * time.Second)
-		ses, err = session.NewSession(config)
+		ses, err = session.NewSessionWithOptions(session.Options{
+			Config:            *config,
+			SharedConfigFiles: cfgFiles,
+		})
 		if err != nil {
 			log.Printf("E! Retry failed for creating credential sessions, error was '%s' \n", err)
 			return ses
 		}
 	}
 	log.Printf("D! Successfully created credential sessions\n")
+	cred, err := ses.Config.Credentials.Get()
+	if err != nil {
+		log.Printf("E! Failed to get credential from session: %v", err)
+	} else {
+		log.Printf("D! Using credential %s from %s", cred.AccessKeyID, cred.ProviderName)
+	}
+	if cred.ProviderName == ec2rolecreds.ProviderName {
+		var found []string
+		cfgFiles = getFallbackSharedConfigFiles(currentUserHomeDir)
+		for _, cfgFile := range cfgFiles {
+			if _, err = os.Stat(cfgFile); err == nil {
+				found = append(found, cfgFile)
+			}
+		}
+		if len(found) > 0 {
+			log.Printf("W! Unused shared config file(s) found: %v. If you would like to use them, "+
+				"please update your common-config.toml.", found)
+			agent.UsageFlags().Set(agent.FlagSharedConfigFallback)
+		}
+	}
 	return ses
 }
 
@@ -96,6 +127,8 @@ func (c *CredentialConfig) rootCredentials() client.ConfigProvider {
 		Region:                        aws.String(c.Region),
 		CredentialsChainVerboseErrors: aws.Bool(true),
 		HTTPClient:                    &http.Client{Timeout: 1 * time.Minute},
+		LogLevel:                      SDKLogLevel(),
+		Logger:                        SDKLogger{},
 	}
 	config.Credentials = getRootCredentialsFromChain(c)
 	return getSession(config)
@@ -106,6 +139,8 @@ func (c *CredentialConfig) assumeCredentials() client.ConfigProvider {
 	config := &aws.Config{
 		Region:     aws.String(c.Region),
 		HTTPClient: &http.Client{Timeout: 1 * time.Minute},
+		LogLevel:   SDKLogLevel(),
+		Logger:     SDKLogger{},
 	}
 	config.Credentials = newStsCredentials(rootCredentials, c.RoleARN, c.Region)
 	return getSession(config)
@@ -143,6 +178,8 @@ func newStsCredentials(c client.ConfigProvider, roleARN string, region string) *
 			Region:              aws.String(region),
 			STSRegionalEndpoint: endpoints.RegionalSTSEndpoint,
 			HTTPClient:          &http.Client{Timeout: 1 * time.Minute},
+			LogLevel:            SDKLogLevel(),
+			Logger:              SDKLogger{},
 		}),
 		RoleARN:  roleARN,
 		Duration: stscreds.DefaultDuration,
@@ -156,6 +193,8 @@ func newStsCredentials(c client.ConfigProvider, roleARN string, region string) *
 			Endpoint:            aws.String(getFallbackEndpoint(fallbackRegion)),
 			STSRegionalEndpoint: endpoints.RegionalSTSEndpoint,
 			HTTPClient:          &http.Client{Timeout: 1 * time.Minute},
+			LogLevel:            SDKLogLevel(),
+			Logger:              SDKLogger{},
 		}),
 		RoleARN:  roleARN,
 		Duration: stscreds.DefaultDuration,

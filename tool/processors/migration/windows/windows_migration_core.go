@@ -4,12 +4,12 @@
 package windows
 
 import (
+	"fmt"
 	"log"
+	"os"
 	"strings"
 
-	"fmt"
 	"github.com/Jeffail/gabs"
-	"os"
 )
 
 const (
@@ -47,7 +47,7 @@ func MapOldWindowsConfigToNewConfig(oldConfig OldSsmCwConfig) (newConfig NewCwCo
 		}
 
 		// This will panic if different regions/credentials exist because the new agent does not support multiple values
-		// TODO: Capture different regions when the new agent is capable of doing so https://sim.amazon.com/issues/CWAgent-2196
+		// TODO: Capture different regions when the new agent is capable of https://github.com/aws/amazon-cloudwatch-agent/issues/230
 		if component.Parameters.Region != "" {
 			if val, ok := newConfig.Agent["region"]; ok && val != component.Parameters.Region {
 				fmt.Fprint(os.Stderr, "Detected multiple different regions in the input config file. This feature is unsupported by the new agent. Thus, will not be able to migrate the old config. Terminating.")
@@ -101,6 +101,9 @@ func MapOldWindowsConfigToNewConfig(oldConfig OldSsmCwConfig) (newConfig NewCwCo
 				} else {
 					mLog.FilePath = mLog.FilePath + component.Parameters.Filter
 				}
+				if newConfig.Logs.LogsCollected.Files == nil {
+					newConfig.Logs.LogsCollected.Files = &FilesEntry{}
+				}
 				newConfig.Logs.LogsCollected.Files.CollectList = append(newConfig.Logs.LogsCollected.Files.CollectList, mLog)
 			}
 		case "AWS.EC2.Windows.CloudWatch.EventLog.EventLogInputComponent,AWS.EC2.Windows.CloudWatch":
@@ -116,6 +119,9 @@ func MapOldWindowsConfigToNewConfig(oldConfig OldSsmCwConfig) (newConfig NewCwCo
 					EventFormat:             "text",
 				}
 				if len(mLog.EventLevels) > 0 {
+					if newConfig.Logs.LogsCollected.WindowsEvents == nil {
+						newConfig.Logs.LogsCollected.WindowsEvents = &WindowsEventsEntry{}
+					}
 					newConfig.Logs.LogsCollected.WindowsEvents.CollectList = append(newConfig.Logs.LogsCollected.WindowsEvents.CollectList, mLog)
 				}
 			}

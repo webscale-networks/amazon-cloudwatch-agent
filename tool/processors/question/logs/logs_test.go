@@ -6,16 +6,14 @@ package logs
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/aws/amazon-cloudwatch-agent/tool/data"
 	"github.com/aws/amazon-cloudwatch-agent/tool/processors/question/events"
-	"github.com/aws/amazon-cloudwatch-agent/tool/processors/serialization"
+	"github.com/aws/amazon-cloudwatch-agent/tool/processors/tracesconfig"
 	"github.com/aws/amazon-cloudwatch-agent/tool/runtime"
-
 	"github.com/aws/amazon-cloudwatch-agent/tool/testutil"
-
 	"github.com/aws/amazon-cloudwatch-agent/tool/util"
-
-	"github.com/stretchr/testify/assert"
 )
 
 func TestProcessor_Process(t *testing.T) {
@@ -27,7 +25,7 @@ func TestProcessor_Process(t *testing.T) {
 
 	conf := new(data.Config)
 
-	testutil.Type(inputChan, "", "/var/log/messages", "", "", "2")
+	testutil.Type(inputChan, "", "/var/log/messages", "", "2", "", "", "2")
 	Processor.Process(ctx, conf)
 	_, confMap := conf.ToMap(ctx)
 	assert.Equal(t,
@@ -37,9 +35,11 @@ func TestProcessor_Process(t *testing.T) {
 					"files": map[string]interface{}{
 						"collect_list": []map[string]interface{}{
 							{
-								"file_path":       "/var/log/messages",
-								"log_group_name":  "messages",
-								"log_stream_name": "{instance_id}",
+								"file_path":         "/var/log/messages",
+								"log_group_name":    "messages",
+								"log_stream_name":   "{instance_id}",
+								"retention_in_days": -1,
+								"log_group_class":   util.InfrequentAccessLogGroupClass,
 							},
 						},
 					},
@@ -53,7 +53,7 @@ func TestProcessor_NextProcessor(t *testing.T) {
 	ctx := new(runtime.Context)
 	conf := new(data.Config)
 	nextProcessor := Processor.NextProcessor(ctx, conf)
-	assert.Equal(t, serialization.Processor, nextProcessor)
+	assert.Equal(t, tracesconfig.Processor, nextProcessor)
 
 	ctx.OsParameter = util.OsTypeWindows
 	nextProcessor = Processor.NextProcessor(ctx, conf)

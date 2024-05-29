@@ -4,20 +4,20 @@
 package stores
 
 import (
-	"fmt"
 	"log"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/influxdata/telegraf"
+	corev1 "k8s.io/api/core/v1"
+
 	. "github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
 	"github.com/aws/amazon-cloudwatch-agent/internal/k8sCommon/k8sclient"
 	"github.com/aws/amazon-cloudwatch-agent/internal/k8sCommon/kubeletutil"
 	"github.com/aws/amazon-cloudwatch-agent/internal/mapWithExpiry"
 	"github.com/aws/amazon-cloudwatch-agent/profiler"
-	"github.com/influxdata/telegraf"
-	corev1 "k8s.io/api/core/v1"
 )
 
 const (
@@ -28,6 +28,7 @@ const (
 	cpuKey             = "cpu"
 	splitRegexStr      = "\\.|-"
 	kubeProxy          = "kube-proxy"
+	ignoreAnnotation   = "aws.amazon.com/cloudwatch-agent-ignore"
 )
 
 var (
@@ -73,7 +74,7 @@ func NewPodStore(hostIP string, prefFullPodName bool) *PodStore {
 
 	// Try to detect kubelet permission issue here
 	if _, err := podStore.kubeClient.ListPods(); err != nil {
-		panic(fmt.Sprintf("Cannot get pod from kubelet, err: %v", err))
+		log.Panicf("Cannot get pod from kubelet, err: %v", err)
 	}
 
 	return podStore
@@ -137,6 +138,11 @@ func (p *PodStore) Decorate(metric telegraf.Metric, kubernetesBlob map[string]in
 		if entry == nil {
 			log.Printf("W! no pod is found after reading through kubelet, add a placeholder for %s", podKey)
 			p.setCachedEntry(podKey, &cachedEntry{creation: time.Now()})
+			return false
+		}
+
+		// Ignore if we're told to ignore
+		if strings.EqualFold(entry.pod.ObjectMeta.Annotations[ignoreAnnotation], "true") {
 			return false
 		}
 

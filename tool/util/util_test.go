@@ -4,15 +4,15 @@
 package util
 
 import (
-	"io/ioutil"
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
-
-	"github.com/aws/amazon-cloudwatch-agent/tool/testutil"
-
-	"os"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/aws/amazon-cloudwatch-agent/tool/testutil"
 )
 
 var expectResult = `{
@@ -31,7 +31,7 @@ func TestCurOS(t *testing.T) {
 }
 
 func TestReadConfigFromJsonFile(t *testing.T) {
-	err := ioutil.WriteFile(ConfigFilePath(), []byte(expectResult), os.ModePerm)
+	err := os.WriteFile(ConfigFilePath(), []byte(expectResult), os.ModePerm)
 	assert.NoError(t, err)
 
 	actualResult := ReadConfigFromJsonFile()
@@ -57,8 +57,8 @@ func TestSerializeResultMapToJsonByteArray(t *testing.T) {
 }
 
 func TestSaveResultByteArrayToJsonFile(t *testing.T) {
-	filePath := SaveResultByteArrayToJsonFile([]byte(expectResult))
-	bytes, err := ioutil.ReadFile(filePath)
+	filePath := SaveResultByteArrayToJsonFile([]byte(expectResult), ConfigFilePath())
+	bytes, err := os.ReadFile(filePath)
 	assert.NoError(t, err)
 	actualResult := string(bytes)
 	assert.Equal(t, expectResult, actualResult)
@@ -124,4 +124,45 @@ func TestChoice(t *testing.T) {
 	parsedAnswer = Choice("Question", 1, []string{"validValue1", "validValue2"})
 
 	assert.Equal(t, "validValue2", parsedAnswer)
+}
+
+func TestChoiceIndex(t *testing.T) {
+	inputChan := testutil.SetUpTestInputStream()
+
+	testutil.Type(inputChan, "")
+
+	parsedAnswer := ChoiceIndex("Question", 1, []string{"validValue1", "validValue2"})
+
+	assert.Equal(t, 0, parsedAnswer)
+
+	testutil.Type(inputChan, "InvalidAnswer", "2")
+
+	parsedAnswer = ChoiceIndex("Question", 1, []string{"validValue1", "validValue2"})
+
+	assert.Equal(t, 1, parsedAnswer)
+}
+
+func TestBackupConfigFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	configFilePath := filepath.Join(tmpDir, "testConfig.json")
+	err := os.WriteFile(configFilePath, []byte(`{"key":"value"}`), 0644)
+	assert.Nil(t, err)
+
+	backupDirPath := filepath.Join(tmpDir, "backup")
+	for i := 0; i < 16; i++ {
+		err = backupConfigFile(configFilePath, backupDirPath)
+		assert.Nil(t, err)
+
+		files, err := os.ReadDir(backupDirPath)
+		assert.Nil(t, err)
+
+		backupFileContents, err := os.ReadFile(filepath.Join(backupDirPath, files[0].Name()))
+		assert.Nil(t, err)
+		assert.Equal(t, `{"key":"value"}`, string(backupFileContents))
+		time.Sleep(time.Second)
+	}
+	files, err := os.ReadDir(backupDirPath)
+	assert.Nil(t, err)
+	assert.Equal(t, 10, len(files))
+
 }

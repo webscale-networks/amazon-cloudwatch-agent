@@ -5,7 +5,7 @@ package collect_list
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"sort"
 
@@ -15,6 +15,7 @@ import (
 	"github.com/aws/amazon-cloudwatch-agent/translator/jsonconfig/mergeJsonUtil"
 	"github.com/aws/amazon-cloudwatch-agent/translator/translate/agent"
 	parent "github.com/aws/amazon-cloudwatch-agent/translator/translate/logs/logs_collected/files"
+	logUtil "github.com/aws/amazon-cloudwatch-agent/translator/translate/logs/util"
 )
 
 type Rule translator.Rule
@@ -36,7 +37,7 @@ func RegisterRule(fieldname string, r []Rule) {
 	ChildRule[fieldname] = r
 }
 
-//resetIndex resets the state of the Index.
+// resetIndex resets the state of the Index.
 func resetIndex() {
 	Index = 0
 }
@@ -47,7 +48,6 @@ type FileConfig struct {
 func (f *FileConfig) ApplyRule(input interface{}) (returnKey string, returnVal interface{}) {
 	m := input.(map[string]interface{})
 	res := []interface{}{}
-	//if translator.IsValid(input, SectionKey, CurrentPath+SectionKey) {
 	if translator.IsValid(input, SectionKey, GetCurPath()) {
 		configArr := m[SectionKey].([]interface{})
 		for i := 0; i < len(configArr); i++ {
@@ -63,11 +63,8 @@ func (f *FileConfig) ApplyRule(input interface{}) (returnKey string, returnVal i
 			}
 			res = append(res, result)
 		}
-
+		logUtil.ValidateLogGroupFields(res, GetCurPath())
 		outputLogConfig(res)
-	} else {
-		returnKey = ""
-		returnVal = ""
 	}
 	returnKey = "file_config"
 	returnVal = res
@@ -118,7 +115,7 @@ func outputLogConfig(logConfigs []interface{}) {
 		Region:     agent.Global_Config.Region,
 	}
 	if bytes, err := json.Marshal(outputFile); err == nil {
-		ioutil.WriteFile(outputLogConfigFilePath, bytes, 0644)
+		os.WriteFile(outputLogConfigFilePath, bytes, 0644)
 	}
 }
 

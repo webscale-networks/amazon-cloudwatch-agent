@@ -4,55 +4,34 @@
 package main
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
 	"syscall"
 
-	"github.com/aws/amazon-cloudwatch-agent/translator/config"
 	"gopkg.in/natefinch/lumberjack.v2"
-)
 
-const (
-	COMMON_CONFIG = "common-config.toml"
-	JSON          = "amazon-cloudwatch-agent.json"
-	TOML          = "amazon-cloudwatch-agent.toml"
-	ENV           = "env-config.json"
-
-	AGENT_LOG_FILE = "amazon-cloudwatch-agent.log"
-
-	//TODO this CONFIG_DIR_IN_CONTAINE should change to something indicate dir, keep it for now to avoid break testing
-	CONFIG_DIR_IN_CONTAINE = "/etc/cwagentconfig"
-)
-
-var (
-	jsonConfigPath   string
-	jsonDirPath      string
-	envConfigPath    string
-	tomlConfigPath   string
-	commonConfigPath string
-
-	agentLogFilePath string
-
-	translatorBinaryPath string
-	agentBinaryPath      string
+	"github.com/aws/amazon-cloudwatch-agent/tool/paths"
+	"github.com/aws/amazon-cloudwatch-agent/translator/config"
 )
 
 // We use an environment variable here because we need this condition before the translator reads agent config json file.
 var runInContainer = os.Getenv(config.RUN_IN_CONTAINER)
 
 func translateConfig() error {
-	args := []string{"--output", tomlConfigPath, "--mode", "auto"}
+	args := []string{"--output", paths.TomlConfigPath, "--mode", "auto"}
 	if runInContainer == config.RUN_IN_CONTAINER_TRUE {
-		args = append(args, "--input-dir", CONFIG_DIR_IN_CONTAINE)
+		args = append(args, "--input-dir", paths.CONFIG_DIR_IN_CONTAINER)
 	} else {
-		args = append(args, "--input", jsonConfigPath, "--input-dir", jsonDirPath, "--config", commonConfigPath)
+		args = append(args, "--input", paths.JsonConfigPath, "--input-dir", paths.JsonDirPath, "--config", paths.CommonConfigPath)
 	}
-	cmd := exec.Command(translatorBinaryPath, args...)
-
-	stdoutStderr, err := cmd.CombinedOutput()
-	log.Printf("I! %s \n", stdoutStderr)
+	cmd := exec.Command(paths.TranslatorBinaryPath, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stdout
+	err := cmd.Run()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			status := exitErr.Sys().(syscall.WaitStatus)
@@ -61,7 +40,7 @@ func translateConfig() error {
 				log.Printf("I! Return exit error: exit code=%d\n", status.ExitStatus())
 
 				if status.ExitStatus() == config.ERR_CODE_NOJSONFILE {
-					log.Printf("I! there is no json configuration when running translator\n")
+					log.Printf("I! No json config files found, please provide config, exit now\n")
 					os.Exit(0)
 				}
 			}
@@ -78,7 +57,7 @@ func main() {
 
 	if runInContainer != config.RUN_IN_CONTAINER_TRUE {
 		writer = &lumberjack.Logger{
-			Filename:   agentLogFilePath,
+			Filename:   paths.AgentLogFilePath,
 			MaxSize:    100, //MB
 			MaxBackups: 5,   //backup files
 			MaxAge:     7,   //days
@@ -89,11 +68,37 @@ func main() {
 	}
 
 	if err := translateConfig(); err != nil {
-		log.Fatalf("E! Cannot translate JSON config into TOML, ERROR is %v \n", err)
+		log.Fatalf("E! Cannot translate JSON, ERROR is %v \n", err)
 	}
-	log.Printf("I! Config has been translated into TOML %s \n", tomlConfigPath)
+	log.Printf("I! Config has been translated into TOML %s \n", paths.TomlConfigPath)
+	printFileContents(paths.TomlConfigPath)
+	log.Printf("I! Config has been translated into YAML %s \n", paths.YamlConfigPath)
+	printFileContents(paths.YamlConfigPath)
 
 	if err := startAgent(writer); err != nil {
+		log.Printf("E! Error when starting Agent, Error is %v \n", err)
 		os.Exit(1)
 	}
+}
+
+func printFileContents(path string) {
+	file, err := os.Open(path)
+	if err != nil {
+		// YAML file may or may not exist and that is okay.
+		if !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("E! Error when printing file(%s) contents, Error is %v \n", path, err)
+		}
+		return
+	}
+	defer func() {
+		if err = file.Close(); err != nil {
+			log.Printf("E! Error when closing file, Error is %v \n", err)
+		}
+	}()
+
+	b, err := io.ReadAll(file)
+	if err != nil {
+		log.Printf("E! Error when reading file(%s), Error is %v \n", path, err)
+	}
+	log.Printf("D! config %v", string(b))
 }

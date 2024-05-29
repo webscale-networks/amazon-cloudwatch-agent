@@ -7,14 +7,15 @@ import (
 	"testing"
 	"time"
 
-	. "github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
 	"github.com/influxdata/telegraf/metric"
 	"github.com/stretchr/testify/assert"
+
+	. "github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
 )
 
 func TestUtils_addKubernetesInfo(t *testing.T) {
 	tags := map[string]string{ContainerNamekey: "testContainer", K8sPodNameKey: "testPod", PodIdKey: "123", K8sNamespace: "testNamespace", TypeService: "testService", NodeNameKey: "testNode"}
-	m, _ := metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m := metric.New("test", tags, map[string]interface{}{}, time.Now())
 	kubernetesBlob := map[string]interface{}{}
 	AddKubernetesInfo(m, kubernetesBlob)
 	assert.Equal(t, "", m.Tags()[ContainerNamekey])

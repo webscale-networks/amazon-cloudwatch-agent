@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/aws/amazon-cloudwatch-agent/translator/config"
 	"github.com/aws/amazon-cloudwatch-agent/translator/context"
-
-	"github.com/stretchr/testify/assert"
 )
 
 func TestApplyRule(t *testing.T) {
@@ -45,12 +45,12 @@ func TestApplyRule(t *testing.T) {
 
 	var actual interface{}
 
-	error := json.Unmarshal([]byte(rawJsonString), &input)
-	if error == nil {
+	err := json.Unmarshal([]byte(rawJsonString), &input)
+	if err == nil {
 		context.CurrentContext().SetOs(config.OS_TYPE_WINDOWS)
 		_, actual = w.ApplyRule(input)
 		assert.Equal(t, expected, actual)
 	} else {
-		panic(error)
+		panic(err)
 	}
 }

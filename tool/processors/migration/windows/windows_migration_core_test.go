@@ -4,12 +4,15 @@
 package windows
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestMapOldWindowsConfigToNewConfig(t *testing.T) {
@@ -35,19 +38,22 @@ func TestMapOldWindowsConfigToNewConfig(t *testing.T) {
 
 			// Get actual output
 			newConfig := MapOldWindowsConfigToNewConfig(oldConfig)
-
+			confBytes, err := json.Marshal(newConfig)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			actualJson := string(confBytes)
 			// Get the expected
 			absPath, _ = filepath.Abs(tc.outputFile)
-			expectedConfig, err := ReadNewConfigFromPath(absPath)
+			expectedJson, err := ReadConfigFromPathAsString(absPath)
 			if err != nil {
 				t.Error(err)
 				return
 			}
 
-			// Assert
-			if !AreTwoConfigurationsEqual(newConfig, expectedConfig) {
-				t.Errorf("The generated new config is incorrect, got:\n %v\n, want:\n %v.\n", newConfig, expectedConfig)
-			}
+			// strict compare JSON strings
+			assert.JSONEq(t, expectedJson, actualJson)
 		})
 	}
 }
@@ -61,7 +67,7 @@ func TestInvalidOldWindowsConfig(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		t.Run(fmt.Sprintf("%s", tc.inputFile), func(t *testing.T) {
+		t.Run(tc.inputFile, func(t *testing.T) {
 			// Get input
 			absPath, _ := filepath.Abs(tc.inputFile)
 			oldConfig, err := ReadOldConfigFromPath(absPath)

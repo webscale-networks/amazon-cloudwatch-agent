@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/amazon-cloudwatch-agent/internal/mapWithExpiry"
-
-	. "github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
-	"github.com/aws/amazon-cloudwatch-agent/internal/k8sCommon/k8sclient"
 	"github.com/influxdata/telegraf/metric"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	corev1 "k8s.io/api/core/v1"
+
+	. "github.com/aws/amazon-cloudwatch-agent/internal/containerinsightscommon"
+	"github.com/aws/amazon-cloudwatch-agent/internal/k8sCommon/k8sclient"
+	"github.com/aws/amazon-cloudwatch-agent/internal/mapWithExpiry"
 )
 
 func getBaseTestPodInfo() *corev1.Pod {
@@ -193,7 +193,7 @@ func TestPodStore_decorateCpu(t *testing.T) {
 	tags := map[string]string{MetricType: TypePod}
 	fields := map[string]interface{}{MetricName(TypePod, CpuTotal): float64(1)}
 
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 
 	podStore.decorateCpu(m, tags, pod)
 
@@ -213,7 +213,7 @@ func TestPodStore_decorateMem(t *testing.T) {
 	tags := map[string]string{MetricType: TypePod}
 	fields := map[string]interface{}{MetricName(TypePod, MemWorkingset): int64(10 * 1024 * 1024)}
 
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 
 	podStore.decorateMem(m, tags, pod)
 
@@ -226,10 +226,28 @@ func TestPodStore_decorateMem(t *testing.T) {
 	assert.Equal(t, float64(2.5), resultFields["pod_memory_utilization"])
 }
 
+func TestPodStore_Decorate(t *testing.T) {
+	podStore := &PodStore{nodeInfo: &nodeInfo{NodeCapacity: &NodeCapacity{MemCapacity: 400 * 1024 * 1024, CPUCapacity: 4}}, cache: mapWithExpiry.NewMapWithExpiry(PodsExpiry)}
+	pod := getBaseTestPodInfo()
+	pod.ObjectMeta.Annotations[ignoreAnnotation] = "true"
+	podStore.setCachedEntry("namespace:test,podName:test", &cachedEntry{
+		pod:      *pod,
+		creation: time.Now(),
+	})
+
+	tags := map[string]string{MetricType: TypePod, K8sPodNameKey: "test", K8sNamespace: "test"}
+	fields := map[string]interface{}{MetricName(TypePod, MemWorkingset): int64(10 * 1024 * 1024)}
+
+	m := metric.New("test", tags, fields, time.Now())
+	kubernetesBlob := map[string]interface{}{}
+
+	assert.False(t, podStore.Decorate(m, kubernetesBlob))
+}
+
 func TestPodStore_addContainerCount(t *testing.T) {
 	pod := getBaseTestPodInfo()
 	tags := map[string]string{MetricType: TypePod}
-	m, _ := metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m := metric.New("test", tags, map[string]interface{}{}, time.Now())
 	addContainerCount(m, tags, pod)
 	assert.Equal(t, int64(1), m.Fields()[MetricName(TypePod, RunningContainerCount)])
 	assert.Equal(t, int64(1), m.Fields()[MetricName(TypePod, ContainerCount)])
@@ -243,7 +261,7 @@ func TestPodStore_addContainerCount(t *testing.T) {
 func TestPodStore_addStatus(t *testing.T) {
 	pod := getBaseTestPodInfo()
 	tags := map[string]string{MetricType: TypePod, K8sNamespace: "default", K8sPodNameKey: "cpu-limit"}
-	m, _ := metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m := metric.New("test", tags, map[string]interface{}{}, time.Now())
 	podStore := &PodStore{prevMeasurements: make(map[string]*mapWithExpiry.MapWithExpiry)}
 
 	podStore.addStatus(m, tags, pod)
@@ -252,7 +270,7 @@ func TestPodStore_addStatus(t *testing.T) {
 	assert.False(t, ok)
 
 	tags = map[string]string{MetricType: TypeContainer, K8sNamespace: "default", K8sPodNameKey: "cpu-limit", ContainerNamekey: "ubuntu"}
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	podStore.addStatus(m, tags, pod)
 	assert.Equal(t, "Running", m.Fields()[ContainerStatus].(string))
 	_, ok = m.Fields()[ContainerRestartCount]
@@ -265,13 +283,13 @@ func TestPodStore_addStatus(t *testing.T) {
 	pod.Status.Phase = "Succeeded"
 
 	tags = map[string]string{MetricType: TypePod, K8sNamespace: "default", K8sPodNameKey: "cpu-limit"}
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	podStore.addStatus(m, tags, pod)
 	assert.Equal(t, "Succeeded", m.Fields()[PodStatus].(string))
 	assert.Equal(t, int64(1), m.Fields()[MetricName(TypePod, ContainerRestartCount)].(int64))
 
 	tags = map[string]string{MetricType: TypeContainer, K8sNamespace: "default", K8sPodNameKey: "cpu-limit", ContainerNamekey: "ubuntu"}
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	podStore.addStatus(m, tags, pod)
 	assert.Equal(t, "Terminated", m.Fields()[ContainerStatus].(string))
 	assert.Equal(t, "OOMKilled", m.Fields()[ContainerLastTerminationReason].(string))
@@ -280,12 +298,12 @@ func TestPodStore_addStatus(t *testing.T) {
 	// test delta of restartCount
 	pod.Status.ContainerStatuses[0].RestartCount = 3
 	tags = map[string]string{MetricType: TypePod, K8sNamespace: "default", K8sPodNameKey: "cpu-limit"}
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	podStore.addStatus(m, tags, pod)
 	assert.Equal(t, int64(2), m.Fields()[MetricName(TypePod, ContainerRestartCount)].(int64))
 
 	tags = map[string]string{MetricType: TypeContainer, K8sNamespace: "default", K8sPodNameKey: "cpu-limit", ContainerNamekey: "ubuntu"}
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	podStore.addStatus(m, tags, pod)
 	assert.Equal(t, int64(2), m.Fields()[ContainerRestartCount].(int64))
 }
@@ -293,7 +311,7 @@ func TestPodStore_addStatus(t *testing.T) {
 func TestPodStore_addContainerId(t *testing.T) {
 	pod := getBaseTestPodInfo()
 	tags := map[string]string{ContainerNamekey: "ubuntu", ContainerIdkey: "123"}
-	m, _ := metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m := metric.New("test", tags, map[string]interface{}{}, time.Now())
 	kubernetesBlob := map[string]interface{}{}
 	addContainerId(pod, tags, m, kubernetesBlob)
 
@@ -303,7 +321,7 @@ func TestPodStore_addContainerId(t *testing.T) {
 	assert.Equal(t, map[string]string{ContainerNamekey: "ubuntu"}, m.Tags())
 
 	tags = map[string]string{ContainerNamekey: "notUbuntu", ContainerIdkey: "123"}
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	kubernetesBlob = map[string]interface{}{}
 	addContainerId(pod, tags, m, kubernetesBlob)
 
@@ -322,13 +340,10 @@ func TestPodStore_addLabel(t *testing.T) {
 	assert.Equal(t, expected, kubernetesBlob)
 }
 
-//
 // Mock client start
-//
 var mockClient = new(MockClient)
 
 var mockK8sClient = &k8sclient.K8sClient{
-	Job:        mockClient,
 	ReplicaSet: mockClient,
 }
 
@@ -337,16 +352,9 @@ func mockGet() *k8sclient.K8sClient {
 }
 
 type MockClient struct {
-	k8sclient.JobClient
 	k8sclient.ReplicaSetClient
 
 	mock.Mock
-}
-
-// k8sclient.JobClient
-func (client *MockClient) JobToCronJob() map[string]string {
-	args := client.Called()
-	return args.Get(0).(map[string]string)
 }
 
 // k8sclient.ReplicaSetClient
@@ -365,13 +373,10 @@ func (client *MockClient) Shutdown() {
 // Mock client end
 //
 
-//
 // Mock client 2 start
-//
 var mockClient2 = new(MockClient2)
 
 var mockK8sClient2 = &k8sclient.K8sClient{
-	Job:        mockClient2,
 	ReplicaSet: mockClient2,
 }
 
@@ -380,16 +385,9 @@ func mockGet2() *k8sclient.K8sClient {
 }
 
 type MockClient2 struct {
-	k8sclient.JobClient
 	k8sclient.ReplicaSetClient
 
 	mock.Mock
-}
-
-// k8sclient.JobClient
-func (client *MockClient2) JobToCronJob() map[string]string {
-	args := client.Called()
-	return args.Get(0).(map[string]string)
 }
 
 // k8sclient.ReplicaSetClient
@@ -423,16 +421,14 @@ func TestGetJobNamePrefix(t *testing.T) {
 
 func TestPodStore_addPodOwnersAndPodNameFallback(t *testing.T) {
 	k8sclient.Get = mockGet2
-	mockClient2.On("JobToCronJob").Return(map[string]string{})
 	mockClient2.On("ReplicaSetToDeployment").Return(map[string]string{})
 
 	podStore := &PodStore{}
 	pod := getBaseTestPodInfo()
 	tags := map[string]string{MetricType: TypePod, ContainerNamekey: "ubuntu"}
-	m, _ := metric.New("test", tags, map[string]interface{}{}, time.Now())
 
 	// Test ReplicaSet
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m := metric.New("test", tags, map[string]interface{}{}, time.Now())
 	rsName := "ReplicaSetTest"
 	suffix := "-42kcz"
 	pod.OwnerReferences[0].Kind = ReplicaSet
@@ -446,7 +442,7 @@ func TestPodStore_addPodOwnersAndPodNameFallback(t *testing.T) {
 	assert.Equal(t, expectedOwner, kubernetesBlob)
 
 	// Test Job
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	jobName := "Job"
 	suffix = "-0123456789"
 	pod.OwnerReferences[0].Kind = Job
@@ -461,14 +457,13 @@ func TestPodStore_addPodOwnersAndPodNameFallback(t *testing.T) {
 
 func TestPodStore_addPodOwnersAndPodName(t *testing.T) {
 	k8sclient.Get = mockGet
-	mockClient.On("JobToCronJob").Return(map[string]string{"CronJobTest-1556582405": "CronJobTest"})
 	mockClient.On("ReplicaSetToDeployment").Return(map[string]string{"DeploymentTest-sftrz2785": "DeploymentTest"})
 
 	podStore := &PodStore{}
 
 	pod := getBaseTestPodInfo()
 	tags := map[string]string{MetricType: TypePod, ContainerNamekey: "ubuntu"}
-	m, _ := metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m := metric.New("test", tags, map[string]interface{}{}, time.Now())
 
 	// Test DaemonSet
 	kubernetesBlob := map[string]interface{}{}
@@ -481,7 +476,7 @@ func TestPodStore_addPodOwnersAndPodName(t *testing.T) {
 	assert.Equal(t, expectedOwner, kubernetesBlob)
 
 	// Test ReplicaSet
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	rsName := "ReplicaSetTest"
 	pod.OwnerReferences[0].Kind = ReplicaSet
 	pod.OwnerReferences[0].Name = rsName
@@ -493,7 +488,7 @@ func TestPodStore_addPodOwnersAndPodName(t *testing.T) {
 	assert.Equal(t, expectedOwner, kubernetesBlob)
 
 	// Test StatefulSet
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	ssName := "StatefulSetTest"
 	pod.OwnerReferences[0].Kind = StatefulSet
 	pod.OwnerReferences[0].Name = ssName
@@ -517,7 +512,7 @@ func TestPodStore_addPodOwnersAndPodName(t *testing.T) {
 
 	// Test Job
 	podStore.prefFullPodName = true
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	jobName := "JobTest"
 	pod.OwnerReferences[0].Kind = Job
 	surfixHash := ".088123x12"
@@ -538,7 +533,7 @@ func TestPodStore_addPodOwnersAndPodName(t *testing.T) {
 	assert.Equal(t, expectedOwner, kubernetesBlob)
 
 	// Test Deployment
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	dpName := "DeploymentTest"
 	pod.OwnerReferences[0].Kind = ReplicaSet
 	pod.OwnerReferences[0].Name = dpName + "-sftrz2785"
@@ -550,7 +545,7 @@ func TestPodStore_addPodOwnersAndPodName(t *testing.T) {
 	assert.Equal(t, expectedOwner, kubernetesBlob)
 
 	// Test CronJob
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	cjName := "CronJobTest"
 	pod.OwnerReferences[0].Kind = Job
 	pod.OwnerReferences[0].Name = cjName + "-1556582405"
@@ -563,7 +558,7 @@ func TestPodStore_addPodOwnersAndPodName(t *testing.T) {
 
 	// Test kube-proxy created in kops
 	podStore.prefFullPodName = true
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	kpName := kubeProxy + "-xyz1"
 	pod.OwnerReferences = nil
 	pod.Name = kpName
@@ -573,7 +568,7 @@ func TestPodStore_addPodOwnersAndPodName(t *testing.T) {
 	assert.True(t, len(kubernetesBlob) == 0)
 
 	podStore.prefFullPodName = false
-	m, _ = metric.New("test", tags, map[string]interface{}{}, time.Now())
+	m = metric.New("test", tags, map[string]interface{}{}, time.Now())
 	pod.OwnerReferences = nil
 	pod.Name = kpName
 	kubernetesBlob = map[string]interface{}{}
@@ -606,7 +601,7 @@ func TestPodStore_decorateNode(t *testing.T) {
 	tags := map[string]string{MetricType: TypeNode}
 	fields := map[string]interface{}{MetricName(TypeNode, CpuTotal): float64(100), MetricName(TypeNode, MemWorkingset): uint64(100 * 1024 * 1024)}
 
-	m, _ := metric.New("test", tags, fields, time.Now())
+	m := metric.New("test", tags, fields, time.Now())
 	podStore.decorateNode(m)
 
 	resultFields := m.Fields()
@@ -633,7 +628,7 @@ func TestPodStore_decorateDiskDevice(t *testing.T) {
 
 	tags := map[string]string{MetricType: TypeNodeFS, DiskDev: "/dev/xvda"}
 
-	m, _ := metric.New("test", tags, nil, time.Now())
+	m := metric.New("test", tags, nil, time.Now())
 	podStore.decorateDiskDevice(m, tags)
 
 	assert.Equal(t, "aws://us-west-2b/vol-0d9f0816149eb2050", m.Tags()[EbsVolumeId])

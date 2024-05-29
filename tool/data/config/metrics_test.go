@@ -6,17 +6,17 @@ package config
 import (
 	"testing"
 
-	"github.com/aws/amazon-cloudwatch-agent/tool/runtime"
-
-	"github.com/aws/amazon-cloudwatch-agent/tool/util"
-
 	"github.com/stretchr/testify/assert"
+
+	"github.com/aws/amazon-cloudwatch-agent/tool/runtime"
+	"github.com/aws/amazon-cloudwatch-agent/tool/util"
 )
 
 func TestMetrics_ToMap(t *testing.T) {
 	expectedKey := "metrics"
 	expectedValue := map[string]interface{}{
-		"append_dimensions": map[string]interface{}{"ImageId": "${aws:ImageId}", "InstanceId": "${aws:InstanceId}", "InstanceType": "${aws:InstanceType}", "AutoScalingGroupName": "${aws:AutoScalingGroupName}"},
+		"aggregation_dimensions": [][]string{{"InstanceId"}},
+		"append_dimensions":      map[string]interface{}{"ImageId": "${aws:ImageId}", "InstanceId": "${aws:InstanceId}", "InstanceType": "${aws:InstanceType}", "AutoScalingGroupName": "${aws:AutoScalingGroupName}"},
 		"metrics_collected": map[string]interface{}{
 			"diskio":   map[string]interface{}{"resources": []string{"*"}, "measurement": []string{"io_time", "write_bytes", "read_bytes", "writes", "reads"}},
 			"mem":      map[string]interface{}{"measurement": []string{"mem_used_percent"}},
@@ -31,10 +31,11 @@ func TestMetrics_ToMap(t *testing.T) {
 	}
 	conf := new(Metrics)
 	ctx := &runtime.Context{
-		OsParameter:            util.OsTypeLinux,
-		WantEC2TagDimensions:   true,
-		IsOnPrem:               true,
-		WantPerInstanceMetrics: true,
+		OsParameter:             util.OsTypeLinux,
+		WantEC2TagDimensions:    true,
+		WantAggregateDimensions: true,
+		IsOnPrem:                true,
+		WantPerInstanceMetrics:  true,
 	}
 	conf.CollectAllMetrics(ctx)
 	key, value := conf.ToMap(ctx)
@@ -43,10 +44,11 @@ func TestMetrics_ToMap(t *testing.T) {
 
 	conf = new(Metrics)
 	ctx = &runtime.Context{
-		OsParameter:            util.OsTypeDarwin,
-		WantEC2TagDimensions:   true,
-		IsOnPrem:               true,
-		WantPerInstanceMetrics: true,
+		OsParameter:             util.OsTypeDarwin,
+		WantEC2TagDimensions:    true,
+		WantAggregateDimensions: true,
+		IsOnPrem:                true,
+		WantPerInstanceMetrics:  true,
 	}
 	conf.CollectAllMetrics(ctx)
 	key, value = conf.ToMap(ctx)
@@ -54,7 +56,8 @@ func TestMetrics_ToMap(t *testing.T) {
 	assert.Equal(t, expectedValue, value)
 
 	expectedValue = map[string]interface{}{
-		"append_dimensions": map[string]interface{}{"InstanceId": "${aws:InstanceId}", "InstanceType": "${aws:InstanceType}", "AutoScalingGroupName": "${aws:AutoScalingGroupName}", "ImageId": "${aws:ImageId}"},
+		"aggregation_dimensions": [][]string{{"InstanceId"}},
+		"append_dimensions":      map[string]interface{}{"InstanceId": "${aws:InstanceId}", "InstanceType": "${aws:InstanceType}", "AutoScalingGroupName": "${aws:AutoScalingGroupName}", "ImageId": "${aws:ImageId}"},
 		"metrics_collected": map[string]interface{}{
 			"LogicalDisk":       map[string]interface{}{"resources": []string{"*"}, "measurement": []string{"% Free Space"}},
 			"Memory":            map[string]interface{}{"measurement": []string{"% Committed Bytes In Use"}},

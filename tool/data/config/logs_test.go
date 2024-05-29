@@ -6,9 +6,10 @@ package config
 import (
 	"testing"
 
-	"github.com/aws/amazon-cloudwatch-agent/tool/runtime"
-
 	"github.com/stretchr/testify/assert"
+
+	"github.com/aws/amazon-cloudwatch-agent/tool/runtime"
+	"github.com/aws/amazon-cloudwatch-agent/tool/util"
 )
 
 func TestLogs_ToMap(t *testing.T) {
@@ -23,21 +24,27 @@ func TestLogs_ToMap(t *testing.T) {
 						"timestamp_format":         "%H:%M:%S %y %b %d",
 						"timezone":                 "UTC",
 						"multi_line_start_pattern": "{timestamp_format}",
-						"log_stream_name":          "{hostname}"},
+						"log_stream_name":          "{hostname}",
+						"retention_in_days":        1,
+						"log_group_class":          util.StandardLogGroupClass,
+					},
 					{
 						"file_path":                "file2",
 						"log_group_name":           "log_group_2",
 						"timestamp_format":         "%H:%M:%S %y %b %d",
 						"timezone":                 "UTC",
 						"multi_line_start_pattern": "{timestamp_format}",
-						"log_stream_name":          "{hostname}"},
+						"log_stream_name":          "{hostname}",
+						"retention_in_days":        1,
+						"log_group_class":          util.StandardLogGroupClass,
+					},
 				},
 			},
 		},
 	}
 	conf := new(Logs)
-	conf.AddLogFile("file1", "log_group_1", "{hostname}", "%H:%M:%S %y %b %d", "UTC", "{timestamp_format}", "")
-	conf.AddLogFile("file2", "log_group_2", "{hostname}", "%H:%M:%S %y %b %d", "UTC", "{timestamp_format}", "")
+	conf.AddLogFile("file1", "log_group_1", "{hostname}", "%H:%M:%S %y %b %d", "UTC", "{timestamp_format}", "", 1, util.StandardLogGroupClass)
+	conf.AddLogFile("file2", "log_group_2", "{hostname}", "%H:%M:%S %y %b %d", "UTC", "{timestamp_format}", "", 1, util.StandardLogGroupClass)
 	ctx := &runtime.Context{}
 	key, value := conf.ToMap(ctx)
 	assert.Equal(t, expectedKey, key)

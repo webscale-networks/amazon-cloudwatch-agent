@@ -5,10 +5,10 @@ package basicInfo
 
 import (
 	"fmt"
-	"github.com/aws/amazon-cloudwatch-agent/tool/processors/agentconfig"
 
 	"github.com/aws/amazon-cloudwatch-agent/tool/data"
 	"github.com/aws/amazon-cloudwatch-agent/tool/processors"
+	"github.com/aws/amazon-cloudwatch-agent/tool/processors/agentconfig"
 	"github.com/aws/amazon-cloudwatch-agent/tool/runtime"
 	"github.com/aws/amazon-cloudwatch-agent/tool/util"
 )
@@ -33,9 +33,13 @@ func ensurePermission() {
 }
 
 func welcome() {
-	fmt.Println("=============================================================")
-	fmt.Println("= Welcome to the AWS CloudWatch Agent Configuration Manager =")
-	fmt.Println("=============================================================")
+	fmt.Println("================================================================")
+	fmt.Println("= Welcome to the Amazon CloudWatch Agent Configuration Manager =")
+	fmt.Println("=                                                              =")
+	fmt.Println("= CloudWatch Agent allows you to collect metrics and logs from =")
+	fmt.Println("= your host and send them to CloudWatch. Additional CloudWatch =")
+	fmt.Println("= charges may apply.                                           =")
+	fmt.Println("================================================================")
 }
 
 func whichOS(ctx *runtime.Context) {

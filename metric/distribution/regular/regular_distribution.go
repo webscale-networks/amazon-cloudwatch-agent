@@ -4,9 +4,13 @@
 package regular
 
 import (
-	"github.com/aws/amazon-cloudwatch-agent/metric/distribution"
+	"fmt"
 	"log"
 	"math"
+
+	"go.opentelemetry.io/collector/pdata/pmetric"
+
+	"github.com/aws/amazon-cloudwatch-agent/metric/distribution"
 )
 
 type RegularDistribution struct {
@@ -64,42 +68,41 @@ func (regularDist *RegularDistribution) Size() int {
 }
 
 // weight is 1/samplingRate
-func (regularDist *RegularDistribution) AddEntryWithUnit(value float64, weight float64, unit string) {
-	if weight > 0 {
-		if value < 0 {
-			log.Printf("W! Value cannot be negative: %v", value)
-			return
-		}
-		//sample count
-		regularDist.sampleCount += weight
-		//sum
-		regularDist.sum += value * weight
-		//min
-		if value < regularDist.minimum {
-			regularDist.minimum = value
-		}
-		//max
-		if value > regularDist.maximum {
-			regularDist.maximum = value
-		}
-
-		//values and counts
-		regularDist.buckets[value] += weight
-
-		//unit
-		if regularDist.unit == "" {
-			regularDist.unit = unit
-		} else if regularDist.unit != unit && unit != "" {
-			log.Printf("D! Multiple units are dected: %s, %s", regularDist.unit, unit)
-		}
-	} else {
-		log.Printf("D! Weight should be larger than 0: %v", weight)
+func (regularDist *RegularDistribution) AddEntryWithUnit(value float64, weight float64, unit string) error {
+	if weight <= 0 {
+		return fmt.Errorf("unsupported weight %v: %w", weight, distribution.ErrUnsupportedWeight)
 	}
+	if !distribution.IsSupportedValue(value, 0, distribution.MaxValue) {
+		return fmt.Errorf("unsupported value %v: %w", value, distribution.ErrUnsupportedValue)
+	}
+	//sample count
+	regularDist.sampleCount += weight
+	//sum
+	regularDist.sum += value * weight
+	//min
+	if value < regularDist.minimum {
+		regularDist.minimum = value
+	}
+	//max
+	if value > regularDist.maximum {
+		regularDist.maximum = value
+	}
+
+	//values and counts
+	regularDist.buckets[value] += weight
+
+	//unit
+	if regularDist.unit == "" {
+		regularDist.unit = unit
+	} else if regularDist.unit != unit && unit != "" {
+		log.Printf("D! Multiple units are detected: %s, %s", regularDist.unit, unit)
+	}
+	return nil
 }
 
 // weight is 1/samplingRate
-func (regularDist *RegularDistribution) AddEntry(value float64, weight float64) {
-	regularDist.AddEntryWithUnit(value, weight, "")
+func (regularDist *RegularDistribution) AddEntry(value float64, weight float64) error {
+	return regularDist.AddEntryWithUnit(value, weight, "")
 }
 
 func (regularDist *RegularDistribution) AddDistribution(distribution distribution.Distribution) {
@@ -140,6 +143,33 @@ func (regularDist *RegularDistribution) AddDistributionWithWeight(distribution d
 		}
 	} else {
 		log.Printf("D! SampleCount * Weight should be larger than 0: %v, %v", distribution.SampleCount(), weight)
+	}
+}
+
+func (rd *RegularDistribution) ConvertToOtel(dp pmetric.HistogramDataPoint) {
+	dp.SetMax(rd.maximum)
+	dp.SetMin(rd.minimum)
+	dp.SetCount(uint64(rd.sampleCount))
+	dp.SetSum(rd.sum)
+	dp.ExplicitBounds().EnsureCapacity(len(rd.buckets))
+	dp.BucketCounts().EnsureCapacity(len(rd.buckets))
+	for k, v := range rd.buckets {
+		dp.ExplicitBounds().Append(k)
+		// Beware of potential loss of precision due to type conversion.
+		dp.BucketCounts().Append(uint64(v))
+	}
+}
+
+func (rd *RegularDistribution) ConvertFromOtel(dp pmetric.HistogramDataPoint, unit string) {
+	rd.maximum = dp.Max()
+	rd.minimum = dp.Min()
+	rd.sampleCount = float64(dp.Count())
+	rd.sum = dp.Sum()
+	rd.unit = unit
+	for i := 0; i < dp.ExplicitBounds().Len(); i++ {
+		k := dp.ExplicitBounds().At(i)
+		v := dp.BucketCounts().At(i)
+		rd.buckets[k] = float64(v)
 	}
 }
 

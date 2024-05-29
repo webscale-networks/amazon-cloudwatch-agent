@@ -15,6 +15,9 @@ import (
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/ianaindex"
+
+	"github.com/aws/amazon-cloudwatch-agent/logs"
+	"github.com/aws/amazon-cloudwatch-agent/profiler"
 )
 
 const (
@@ -22,7 +25,7 @@ const (
 	defaultTruncateSuffix = "[Truncated...]"
 )
 
-//The file config presents the structure of configuration for a file to be tailed.
+// The file config presents the structure of configuration for a file to be tailed.
 type FileConfig struct {
 	//The file path for input log file.
 	FilePath string `toml:"file_path"`
@@ -36,11 +39,13 @@ type FileConfig struct {
 	LogGroupName string `toml:"log_group_name"`
 	//log stream name
 	LogStreamName string `toml:"log_stream_name"`
+	//log group class
+	LogGroupClass string `toml:"log_group_class"`
 
 	//The regex of the timestampFromLogLine presents in the log entry
 	TimestampRegex string `toml:"timestamp_regex"`
 	//The timestampFromLogLine layout used in GoLang to parse the timestampFromLogLine.
-	TimestampLayout string `toml:"timestamp_layout"`
+	TimestampLayout []string `toml:"timestamp_layout"`
 	//The time zone used to parse the timestampFromLogLine in the log entry.
 	Timezone string `toml:"timezone"`
 
@@ -73,6 +78,11 @@ type FileConfig struct {
 	//Suffix to be added to truncated logline to indicate its truncation
 	TruncateSuffix string `toml:"truncate_suffix"`
 
+	//Indicate retention in days for log group
+	RetentionInDays int `toml:"retention_in_days"`
+
+	Filters []*LogFilter `toml:"filters"`
+
 	//Time *time.Location Go type timezone info.
 	TimezoneLoc *time.Location
 	//Regexp go type timestampFromLogLine regex
@@ -82,10 +92,11 @@ type FileConfig struct {
 	//Regexp go type blacklist regex
 	BlacklistRegexP *regexp.Regexp
 	//Decoder object
-	Enc encoding.Encoding
+	Enc         encoding.Encoding
+	sampleCount int
 }
 
-//Initialize some variables in the FileConfig object based on the rest info fetched from the configuration file.
+// Initialize some variables in the FileConfig object based on the rest info fetched from the configuration file.
 func (config *FileConfig) init() error {
 	var err error
 	if !(config.Encoding == "" || config.Encoding == "utf_8" || config.Encoding == "utf-8" || config.Encoding == "utf8" || config.Encoding == "ascii") {
@@ -138,29 +149,29 @@ func (config *FileConfig) init() error {
 	if config.TruncateSuffix == "" {
 		config.TruncateSuffix = defaultTruncateSuffix
 	}
+	if config.RetentionInDays == 0 {
+		config.RetentionInDays = -1
+	}
+
+	for _, f := range config.Filters {
+		err = f.init()
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
 
-//The default log group name calculation logic if the log group name is not specified.
-//It will use the part before the last dot in the file path, e.g.
-// file path: "/tmp/TestLogFile.log.2017-07-11-14" -> log group name: "/tmp/TestLogFile.log"
-// file path: "/tmp/TestLogFile.log" -> log group name: "/tmp/TestLogFile"
-// Note: the above is default log group behavior, it is always recommended to specify the log group name for each input file pattern
-func logGroupName(filePath string) string {
-	suffix := filepath.Ext(filePath)
-	return strings.TrimSuffix(filePath, suffix)
-}
-
-//Try to parse the timestampFromLogLine value from the log entry line.
-//The parser logic will be based on the timestampFromLogLine regex, and time zone info.
-//If the parsing operation encounters any issue, int64(0) is returned.
+// Try to parse the timestampFromLogLine value from the log entry line.
+// The parser logic will be based on the timestampFromLogLine regex, and time zone info.
+// If the parsing operation encounters any issue, int64(0) is returned.
 func (config *FileConfig) timestampFromLogLine(logValue string) time.Time {
 	if config.TimestampRegexP == nil {
 		return time.Time{}
 	}
 	index := config.TimestampRegexP.FindStringSubmatchIndex(logValue)
-	if index != nil && len(index) > 3 {
+	if len(index) > 3 {
 		timestampContent := (logValue)[index[2]:index[3]]
 		if len(index) > 5 {
 			start := index[4] - index[2]
@@ -170,7 +181,14 @@ func (config *FileConfig) timestampFromLogLine(logValue string) time.Time {
 			replacement := fmt.Sprintf(".%s", fracSecond[:3])
 			timestampContent = fmt.Sprintf("%s%s%s", timestampContent[:start], replacement, timestampContent[end:])
 		}
-		timestamp, err := time.ParseInLocation(config.TimestampLayout, timestampContent, config.TimezoneLoc)
+		var err error
+		var timestamp time.Time
+		for _, timestampLayout := range config.TimestampLayout {
+			timestamp, err = time.ParseInLocation(timestampLayout, timestampContent, config.TimezoneLoc)
+			if err == nil {
+				break
+			}
+		}
 		if err != nil {
 			log.Printf("E! Error parsing timestampFromLogLine: %s", err)
 			return time.Time{}
@@ -190,11 +208,45 @@ func (config *FileConfig) timestampFromLogLine(logValue string) time.Time {
 	return time.Time{}
 }
 
-//This method determine whether the line is a start line for multiline log entry.
+// This method determine whether the line is a start line for multiline log entry.
 func (config *FileConfig) isMultilineStart(logValue string) bool {
 
 	if config.MultiLineStartPatternP == nil {
 		return false
 	}
 	return config.MultiLineStartPatternP.MatchString(logValue)
+}
+
+func ShouldPublish(logGroupName, logStreamName string, filters []*LogFilter, event logs.LogEvent) bool {
+	if len(filters) == 0 {
+		return true
+	}
+
+	ret := shouldPublishHelper(filters, event)
+	droppedCount := 0
+	if !ret {
+		droppedCount = 1
+	}
+	profiler.Profiler.AddStats([]string{"logfile", logGroupName, logStreamName, "messages", "dropped"}, float64(droppedCount))
+
+	return ret
+}
+
+func shouldPublishHelper(filters []*LogFilter, event logs.LogEvent) bool {
+	for _, filter := range filters {
+		if !filter.ShouldPublish(event) {
+			return false
+		}
+	}
+	return true
+}
+
+// The default log group name calculation logic if the log group name is not specified.
+// It will use the part before the last dot in the file path, e.g.
+// file path: "/tmp/TestLogFile.log.2017-07-11-14" -> log group name: "/tmp/TestLogFile.log"
+// file path: "/tmp/TestLogFile.log" -> log group name: "/tmp/TestLogFile"
+// Note: the above is default log group behavior, it is always recommended to specify the log group name for each input file pattern
+func logGroupName(filePath string) string {
+	suffix := filepath.Ext(filePath)
+	return strings.TrimSuffix(filePath, suffix)
 }

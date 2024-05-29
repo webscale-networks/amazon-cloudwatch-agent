@@ -5,11 +5,12 @@ package swap
 
 import (
 	"encoding/json"
-	"github.com/stretchr/testify/assert"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
-//Check the case when the input is in "swap":{//specific configuration}
+// Check the case when the input is in "swap":{//specific configuration}
 func TestSwapSpecificConfig(t *testing.T) {
 	s := new(Swap)
 	var input interface{}
@@ -20,11 +21,8 @@ func TestSwapSpecificConfig(t *testing.T) {
 	}
 
 	var input1 interface{}
-	err := json.Unmarshal([]byte(`{"swap":{"measurement": [
-						"used",
-						"free"
-					]}}`), &input1)
-	if err == nil {
+	e = json.Unmarshal([]byte(`{"swap":{"measurement": ["used","free"]}}`), &input1)
+	if e == nil {
 		_, actualVal := s.ApplyRule(input1)
 		expectedVal := []interface{}{map[string]interface{}{
 			"fieldpass": []string{"used", "free"},
@@ -32,6 +30,6 @@ func TestSwapSpecificConfig(t *testing.T) {
 		}
 		assert.Equal(t, expectedVal, actualVal, "Expect to be equal")
 	} else {
-		panic(err)
+		panic(e)
 	}
 }

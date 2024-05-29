@@ -1,26 +1,32 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT
 
+//go:build windows
 // +build windows
 
 package windows_event_log
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
-
+	"sync"
 	"time"
+
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/plugins/inputs"
 
 	"github.com/aws/amazon-cloudwatch-agent/internal/logscommon"
 	"github.com/aws/amazon-cloudwatch-agent/logs"
 	"github.com/aws/amazon-cloudwatch-agent/plugins/inputs/windows_event_log/wineventlog"
-	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
 const (
 	forcePullInterval = 250 * time.Millisecond
 )
+
+var startOnlyOnce sync.Once
 
 type EventConfig struct {
 	Name          string   `toml:"event_name"`
@@ -29,13 +35,16 @@ type EventConfig struct {
 	BatchReadSize int      `toml:"batch_read_size"`
 	LogGroupName  string   `toml:"log_group_name"`
 	LogStreamName string   `toml:"log_stream_name"`
+	LogGroupClass string   `toml:"log_group_class"`
 	Destination   string   `toml:"destination"`
+	Retention     int      `toml:"retention_in_days"`
 }
 
 type Plugin struct {
-	FileStateFolder string        `toml:"file_state_folder"`
-	Events          []EventConfig `toml:"event_config"`
-	Destination     string        `toml:"destination"`
+	FileStateFolder string          `toml:"file_state_folder"`
+	Events          []EventConfig   `toml:"event_config"`
+	Destination     string          `toml:"destination"`
+	Log             telegraf.Logger `toml:"-"`
 
 	newEvents []logs.LogSrc
 }
@@ -72,8 +81,20 @@ func (s *Plugin) FindLogSrc() []logs.LogSrc {
  * We can do any initialization in this method.
  */
 func (s *Plugin) Start(acc telegraf.Accumulator) error {
+	alreadyRan := true
+	startOnlyOnce.Do(func() {
+		alreadyRan = false
+	})
+	if alreadyRan {
+		return nil
+	}
 	for _, eventConfig := range s.Events {
-		stateFilePath := logscommon.WindowsEventLogPrefix + escapeFilePath(eventConfig.LogGroupName)
+		// Assume no 2 EventConfigs have the same combination of:
+		// LogGroupName, LogStreamName, Name.
+		stateFilePath, err := getStateFilePath(s, &eventConfig)
+		if err != nil {
+			return err
+		}
 		destination := eventConfig.Destination
 		if destination == "" {
 			destination = s.Destination
@@ -87,8 +108,10 @@ func (s *Plugin) Start(acc telegraf.Accumulator) error {
 			destination,
 			stateFilePath,
 			eventConfig.BatchReadSize,
+			eventConfig.Retention,
+			eventConfig.LogGroupClass,
 		)
-		err := eventLog.Init()
+		err = eventLog.Init()
 		if err != nil {
 			return err
 		}
@@ -97,7 +120,22 @@ func (s *Plugin) Start(acc telegraf.Accumulator) error {
 	return nil
 }
 
-func escapeFilePath(filePath string) string {
+// getStateFilePath returns a unique file pathname for a given EventConfig.
+func getStateFilePath(plugin *Plugin, ec *EventConfig) (string, error) {
+	if plugin.FileStateFolder == "" {
+		return "", errors.New("empty FileStateFolder")
+	}
+	err := os.MkdirAll(plugin.FileStateFolder, 0755)
+	if err != nil {
+		return "", err
+	}
+	stateFileName := logscommon.WindowsEventLogPrefix +
+		escapeFileName(ec.LogGroupName+"_"+ec.LogStreamName+"_"+ec.Name)
+	return filepath.Join(plugin.FileStateFolder, stateFileName), nil
+}
+
+// escapeFileName returns a valid filename string.
+func escapeFileName(filePath string) string {
 	escapedFilePath := filepath.ToSlash(filePath)
 	escapedFilePath = strings.Replace(escapedFilePath, "/", "_", -1)
 	escapedFilePath = strings.Replace(escapedFilePath, " ", "_", -1)

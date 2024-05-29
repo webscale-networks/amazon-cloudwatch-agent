@@ -4,22 +4,17 @@
 package linux
 
 import (
-	"io/ioutil"
 	"os"
 	"testing"
 
-	"github.com/aws/amazon-cloudwatch-agent/tool/data/config"
-
-	"github.com/aws/amazon-cloudwatch-agent/tool/testutil"
+	"github.com/stretchr/testify/assert"
 
 	"github.com/aws/amazon-cloudwatch-agent/tool/data"
-	"github.com/aws/amazon-cloudwatch-agent/tool/runtime"
-
-	"github.com/aws/amazon-cloudwatch-agent/tool/util"
-
+	"github.com/aws/amazon-cloudwatch-agent/tool/data/config"
 	"github.com/aws/amazon-cloudwatch-agent/tool/processors/question/logs"
-
-	"github.com/stretchr/testify/assert"
+	"github.com/aws/amazon-cloudwatch-agent/tool/runtime"
+	"github.com/aws/amazon-cloudwatch-agent/tool/testutil"
+	"github.com/aws/amazon-cloudwatch-agent/tool/util"
 )
 
 func TestProcessor_Process(t *testing.T) {
@@ -38,11 +33,12 @@ func TestProcessor_Process(t *testing.T) {
 		log_stream_name = {hostname}
 		initial_position = start_of_file
 		log_group_name = /var/log/messages
+		log_group_class = STANDARD
 	`
-	tmpFile, _ := ioutil.TempFile("", "")
+	tmpFile, _ := os.CreateTemp("", "")
 	defer os.Remove(tmpFile.Name())
 
-	err := ioutil.WriteFile(tmpFile.Name(), []byte(tomlString), os.ModePerm)
+	err := os.WriteFile(tmpFile.Name(), []byte(tomlString), os.ModePerm)
 	assert.NoError(t, err)
 
 	expectedMap := map[string]interface{}{
@@ -52,10 +48,12 @@ func TestProcessor_Process(t *testing.T) {
 				"files": map[string]interface{}{
 					"collect_list": []map[string]interface{}{
 						{
-							"timestamp_format": "%b %d %H:%M:%S",
-							"file_path":        "/var/log/messages",
-							"log_group_name":   "/var/log/messages",
-							"log_stream_name":  "{hostname}",
+							"timestamp_format":  "%b %d %H:%M:%S",
+							"file_path":         "/var/log/messages",
+							"log_group_name":    "/var/log/messages",
+							"log_stream_name":   "{hostname}",
+							"log_group_class":   util.StandardLogGroupClass,
+							"retention_in_days": -1,
 						},
 					},
 				},
@@ -95,9 +93,9 @@ func TestProcessConfigFromPythonConfigParserFile(t *testing.T) {
 	[general]
 		state_file = /var/lib/awslogs/agent-state
 
-	[/apollo/env/BaldrBifrost/var/output/log/audit_pusher.log]
-		file = /apollo/env/BaldrBifrost/var/output/log/audit_pusher.log
-		log_group_name = Bifrost/audit_pusher
+	[/var/output/log/audit_pusher.log]
+		file = /var/output/log/audit_pusher.log
+		log_group_name = service/audit_pusher
 		log_stream_name = hsm-bqvuwqn72vk
 		datetime_format = %b %d %H:%M:%S,%f
 		encoding = euc_jp
@@ -118,28 +116,30 @@ func TestProcessConfigFromPythonConfigParserFile(t *testing.T) {
 			"files": map[string]interface{}{
 				"collect_list": []map[string]interface{}{
 					{
-						"file_path":        "/apollo/env/BaldrBifrost/var/output/log/audit_pusher.log",
-						"log_group_name":   "Bifrost/audit_pusher",
-						"timestamp_format": "%b %d %H:%M:%S,%f",
-						"log_stream_name":  "hsm-bqvuwqn72vk",
-						"encoding":         "euc-jp",
-					},
-					{
 						"file_path":                "/var/log/messages",
 						"log_group_name":           "/var/log/messages",
 						"timestamp_format":         "%b %d %H:%M:%S",
 						"multi_line_start_pattern": "{timestamp_format}",
 						"log_stream_name":          "{hostname}",
+						"retention_in_days":        -1,
+					},
+					{
+						"file_path":         "/var/output/log/audit_pusher.log",
+						"log_group_name":    "service/audit_pusher",
+						"timestamp_format":  "%b %d %H:%M:%S,%f",
+						"log_stream_name":   "hsm-bqvuwqn72vk",
+						"encoding":          "euc-jp",
+						"retention_in_days": -1,
 					},
 				},
 			},
 		},
 	}
 
-	tmpFile, _ := ioutil.TempFile("", "")
+	tmpFile, _ := os.CreateTemp("", "")
 	defer os.Remove(tmpFile.Name())
 
-	err := ioutil.WriteFile(tmpFile.Name(), []byte(tomlString), os.ModePerm)
+	err := os.WriteFile(tmpFile.Name(), []byte(tomlString), os.ModePerm)
 	assert.NoError(t, err)
 
 	ctx := new(runtime.Context)

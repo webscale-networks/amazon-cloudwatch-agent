@@ -6,31 +6,40 @@ package cloudwatchlogs
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/aws/amazon-cloudwatch-agent/cfg/agentinfo"
-	configaws "github.com/aws/amazon-cloudwatch-agent/cfg/aws"
-	"github.com/aws/amazon-cloudwatch-agent/handlers"
-	"github.com/aws/amazon-cloudwatch-agent/internal"
-	"github.com/aws/amazon-cloudwatch-agent/logs"
+	"github.com/amazon-contributing/opentelemetry-collector-contrib/extension/awsmiddleware"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/outputs"
+	"go.uber.org/zap"
+
+	configaws "github.com/aws/amazon-cloudwatch-agent/cfg/aws"
+	"github.com/aws/amazon-cloudwatch-agent/cfg/envconfig"
+	"github.com/aws/amazon-cloudwatch-agent/extension/agenthealth"
+	"github.com/aws/amazon-cloudwatch-agent/extension/agenthealth/handler/stats/agent"
+	"github.com/aws/amazon-cloudwatch-agent/extension/agenthealth/handler/useragent"
+	"github.com/aws/amazon-cloudwatch-agent/handlers"
+	"github.com/aws/amazon-cloudwatch-agent/internal"
+	"github.com/aws/amazon-cloudwatch-agent/internal/retryer"
+	"github.com/aws/amazon-cloudwatch-agent/logs"
+	"github.com/aws/amazon-cloudwatch-agent/tool/util"
 )
 
 const (
 	LogGroupNameTag   = "log_group_name"
 	LogStreamNameTag  = "log_stream_name"
+	LogGroupClassTag  = "log_group_class"
 	LogTimestampField = "log_timestamp"
 	LogEntryField     = "value"
 
 	defaultFlushTimeout = 5 * time.Second
-	eventHeaderSize     = 26
+	eventHeaderSize     = 200
 	truncatedSuffix     = "[Truncated...]"
 	msgSizeLimit        = 256*1024 - eventHeaderSize
 
@@ -40,8 +49,14 @@ const (
 	attributesInFields = "attributesInFields"
 )
 
+var (
+	containerInsightsRegexp = regexp.MustCompile("^/aws/.*containerinsights/.*/(performance|prometheus)$")
+)
+
 type CloudWatchLogs struct {
 	Region           string `toml:"region"`
+	RegionType       string `toml:"region_type"`
+	Mode             string `toml:"mode"`
 	EndpointOverride string `toml:"endpoint_override"`
 	AccessKey        string `toml:"access_key"`
 	SecretKey        string `toml:"secret_key"`
@@ -54,11 +69,17 @@ type CloudWatchLogs struct {
 	LogStreamName string `toml:"log_stream_name"`
 	LogGroupName  string `toml:"log_group_name"`
 
+	// Retention for log group
+	RetentionInDays int `toml:"retention_in_days"`
+
 	ForceFlushInterval internal.Duration `toml:"force_flush_interval"` // unit is second
 
 	Log telegraf.Logger `toml:"-"`
 
-	cwDests map[Target]*cwDest
+	pusherStopChan  chan struct{}
+	pusherWaitGroup sync.WaitGroup
+	cwDests         map[Target]*cwDest
+	middleware      awsmiddleware.Middleware
 }
 
 func (c *CloudWatchLogs) Connect() error {
@@ -66,9 +87,13 @@ func (c *CloudWatchLogs) Connect() error {
 }
 
 func (c *CloudWatchLogs) Close() error {
+	close(c.pusherStopChan)
+	c.pusherWaitGroup.Wait()
+
 	for _, d := range c.cwDests {
 		d.Stop()
 	}
+
 	return nil
 }
 
@@ -79,17 +104,22 @@ func (c *CloudWatchLogs) Write(metrics []telegraf.Metric) error {
 	return nil
 }
 
-func (c *CloudWatchLogs) CreateDest(group, stream string) logs.LogDest {
+func (c *CloudWatchLogs) CreateDest(group, stream string, retention int, logGroupClass string) logs.LogDest {
 	if group == "" {
 		group = c.LogGroupName
 	}
 	if stream == "" {
 		stream = c.LogStreamName
 	}
+	if retention <= 0 {
+		retention = -1
+	}
 
 	t := Target{
-		Group:  group,
-		Stream: stream,
+		Group:     group,
+		Stream:    stream,
+		Retention: retention,
+		Class:     logGroupClass,
 	}
 	return c.getDest(t)
 }
@@ -109,18 +139,31 @@ func (c *CloudWatchLogs) getDest(t Target) *cwDest {
 		Token:     c.Token,
 	}
 
+	logThrottleRetryer := retryer.NewLogThrottleRetryer(c.Log)
 	client := cloudwatchlogs.New(
 		credentialConfig.Credentials(),
 		&aws.Config{
-			Endpoint:   aws.String(c.EndpointOverride),
-			HTTPClient: &http.Client{Timeout: 1 * time.Minute},
+			Endpoint: aws.String(c.EndpointOverride),
+			Retryer:  logThrottleRetryer,
+			LogLevel: configaws.SDKLogLevel(),
+			Logger:   configaws.SDKLogger{},
 		},
 	)
+	agent.UsageFlags().SetValue(agent.FlagRegionType, c.RegionType)
+	agent.UsageFlags().SetValue(agent.FlagMode, c.Mode)
+	if containerInsightsRegexp.MatchString(t.Group) {
+		useragent.Get().SetContainerInsightsFlag()
+	}
 	client.Handlers.Build.PushBackNamed(handlers.NewRequestCompressionHandler([]string{"PutLogEvents"}))
-	client.Handlers.Build.PushBackNamed(handlers.NewCustomHeaderHandler("User-Agent", agentinfo.UserAgent()))
-
-	pusher := NewPusher(t, client, c.ForceFlushInterval.Duration, maxRetryTimeout, c.Log)
-	cwd := &cwDest{pusher: pusher}
+	if c.middleware != nil {
+		if err := awsmiddleware.NewConfigurer(c.middleware.Handlers()).Configure(awsmiddleware.SDKv1(&client.Handlers)); err != nil {
+			c.Log.Errorf("Unable to configure middleware on cloudwatch logs client: %v", err)
+		} else {
+			c.Log.Info("Configured middleware on AWS client")
+		}
+	}
+	pusher := NewPusher(t, client, c.ForceFlushInterval.Duration, maxRetryTimeout, c.Log, c.pusherStopChan, &c.pusherWaitGroup)
+	cwd := &cwDest{pusher: pusher, retryer: logThrottleRetryer}
 	c.cwDests[t] = cwd
 	return cwd
 }
@@ -162,7 +205,7 @@ func (c *CloudWatchLogs) getTargetFromMetric(m telegraf.Metric) (Target, error) 
 		logStream = c.LogStreamName
 	}
 
-	return Target{logGroup, logStream}, nil
+	return Target{logGroup, logStream, util.StandardLogGroupClass, -1}, nil
 }
 
 func (c *CloudWatchLogs) getLogEventFromMetric(metric telegraf.Metric) *structuredLogEvent {
@@ -260,6 +303,7 @@ type cwDest struct {
 	sync.Mutex
 	isEMF   bool
 	stopped bool
+	retryer *retryer.LogThrottleRetryer
 }
 
 func (cd *cwDest) Publish(events []logs.LogEvent) error {
@@ -279,7 +323,7 @@ func (cd *cwDest) Publish(events []logs.LogEvent) error {
 }
 
 func (cd *cwDest) Stop() {
-	cd.pusher.Stop()
+	cd.retryer.Stop()
 	cd.stopped = true
 }
 
@@ -312,7 +356,8 @@ func (cd *cwDest) setRetryer(r request.Retryer) {
 }
 
 type Target struct {
-	Group, Stream string
+	Group, Stream, Class string
+	Retention            int
 }
 
 // Description returns a one-sentence description on the Output
@@ -352,7 +397,15 @@ func init() {
 	outputs.Add("cloudwatchlogs", func() telegraf.Output {
 		return &CloudWatchLogs{
 			ForceFlushInterval: internal.Duration{Duration: defaultFlushTimeout},
+			pusherStopChan:     make(chan struct{}),
 			cwDests:            make(map[Target]*cwDest),
+			middleware: agenthealth.NewAgentHealth(
+				zap.NewNop(),
+				&agenthealth.Config{
+					IsUsageDataEnabled: envconfig.IsUsageDataEnabled(),
+					Stats:              agent.StatsConfig{Operations: []string{"PutLogEvents"}},
+				},
+			),
 		}
 	})
 }

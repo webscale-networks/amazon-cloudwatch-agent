@@ -4,32 +4,31 @@
 package jsonconfig
 
 import (
-	"fmt"
+	"log"
 	"os"
 	"sort"
-
-	"github.com/aws/amazon-cloudwatch-agent/translator/util/ecsutil"
 
 	"github.com/aws/amazon-cloudwatch-agent/translator"
 	"github.com/aws/amazon-cloudwatch-agent/translator/config"
 	"github.com/aws/amazon-cloudwatch-agent/translator/jsonconfig/mergeJsonUtil"
+	_ "github.com/aws/amazon-cloudwatch-agent/translator/registerrules"
 	"github.com/aws/amazon-cloudwatch-agent/translator/util"
+	"github.com/aws/amazon-cloudwatch-agent/translator/util/ecsutil"
 )
 
 func MergeJsonConfigMaps(jsonConfigMapMap map[string]map[string]interface{}, defaultJsonConfigMap map[string]interface{}, multiConfig string) (map[string]interface{}, error) {
-	if jsonConfigMapMap == nil || len(jsonConfigMapMap) == 0 {
+	if len(jsonConfigMapMap) == 0 {
 		if os.Getenv(config.USE_DEFAULT_CONFIG) == config.USE_DEFAULT_CONFIG_TRUE {
 			// When USE_DEFAULT_CONFIG is true, ECS and EKS will be supposed to use different default config. EKS default config logic will be added when necessary
 			if ecsutil.GetECSUtilSingleton().IsECS() {
-				fmt.Println("No json config files found, use the default ecs config")
+				log.Println("No json config files found, use the default ecs config")
 				return util.GetJsonMapFromJsonBytes([]byte(config.DefaultECSJsonConfig()))
 			}
 		}
 		if multiConfig == "remove" {
-			fmt.Println("No json config files found, please provide config, exit now")
 			os.Exit(config.ERR_CODE_NOJSONFILE)
 		} else {
-			fmt.Println("No json config files found, use the default one")
+			log.Println("No json config files found, use the default one")
 		}
 		return defaultJsonConfigMap, nil
 	}
@@ -54,7 +53,7 @@ func MergeJsonConfigMaps(jsonConfigMapMap map[string]map[string]interface{}, def
 	}
 
 	if !translator.IsTranslateSuccess() {
-		panic("Failed to merge multiple json config files.")
+		log.Panic("Failed to merge multiple json config files.")
 	}
 
 	return resultMap, nil
